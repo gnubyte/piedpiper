@@ -9,10 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  # Every package must carry the tag's version (scripts/check_version.py); nothing is built or
-  # published otherwise. On a tag this also creates the release as a pre-release with the
-  # download notes (.github/release-notes.md); desktop.yml publishes it once the tested MSI and
-  # DMG are attached.
+  # Every package must carry the tag's version (scripts/check_version.py) and current copies of the
+  # license notices (bindings/sync_notices.py); nothing is built or published otherwise. On a tag
+  # this also creates the release as a pre-release with the download notes
+  # (.github/release-notes.md); desktop.yml publishes it once the tested MSI and DMG are attached.
   version:
     runs-on: ubuntu-latest
     steps:
@@ -20,6 +20,8 @@ jobs:
       - run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then python3 scripts/check_version.py "$GITHUB_REF_NAME"
           else python3 scripts/check_version.py; fi
+      - name: Notice copies in bindings/ match the originals
+        run: python3 bindings/sync_notices.py --check
       - name: Create the release
         if: startsWith(github.ref, 'refs/tags/v')
         env:

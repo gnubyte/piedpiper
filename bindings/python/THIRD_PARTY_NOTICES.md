@@ -212,3 +212,6 @@ platform crates windows-rs and objc2 (MIT / Apache-2.0). Its installers therefor
 `apps/desktop/THIRD_PARTY_LICENSES.md` in place of the root file; regenerate it with
 `python scripts/gen_licenses.py --workspace apps/desktop --out apps/desktop/THIRD_PARTY_LICENSES.md`.
 That workspace applies the same `cabac` patch as the root.
+
+CI's `notices` job fails when a copy in `bindings/` or either license bundle no longer matches what
+it is made from, and release.yml refuses to build a tag whose copies are stale.

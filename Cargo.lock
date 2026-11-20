@@ -320,6 +320,7 @@ version = "0.1.2"
 name = "piedpiper-python"
 version = "0.1.2"
 dependencies = [
+ "cabac",
  "piedpiper",
  "pyo3",
 ]

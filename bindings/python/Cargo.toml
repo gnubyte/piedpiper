@@ -13,3 +13,10 @@ crate-type = ["cdylib"]
 [dependencies]
 piedpiper = { path = "../../crates/core" }
 pyo3 = { version = "0.30", features = ["abi3-py39"] }
+
+# Packaging only, unused by the code: `maturin sdist` packs only the crates this one depends on by
+# path, and the root `[patch.crates-io]` that swaps the LGPL `cabac` crate for crates/cabac-shim
+# needs the shim in the sdist too, or no wheel builds from it. A dev-dependency leaves the library
+# build untouched.
+[dev-dependencies]
+cabac = { path = "../../crates/cabac-shim" }

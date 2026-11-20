@@ -140,3 +140,26 @@ jobs:
       - name: Package versions agree
         run: python3 scripts/check_version.py
       - run: cargo clippy -p piedpiper -p piedpiper-cli -- -D warnings -A clippy::needless_range_loop -A clippy::too_many_arguments
+
+  # Every package ships LICENSE and the third-party notices (THIRD_PARTY_NOTICES.md lists where).
+  # The npm and Python packages pack copies of them, and each license bundle must list exactly the
+  # crates compiled in; the desktop app is a workspace of its own with its own bundle.
+  notices:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Notice copies in bindings/ match the originals
+        run: |
+          python3 bindings/sync_notices.py --check || {
+            echo "::error::Stale notice copies: run python bindings/sync_notices.py and commit the result."; exit 1; }
+      - name: License bundles match the dependency trees
+        run: |
+          cargo fetch --locked
+          (cd apps/desktop && cargo fetch --locked)
+          python3 scripts/gen_licenses.py --out "$RUNNER_TEMP/root.md"
+          python3 scripts/gen_licenses.py --workspace apps/desktop --out "$RUNNER_TEMP/desktop.md"
+          diff -u THIRD_PARTY_LICENSES.md "$RUNNER_TEMP/root.md" || {
+            echo "::error::Stale THIRD_PARTY_LICENSES.md: run python scripts/gen_licenses.py, then python bindings/sync_notices.py."; exit 1; }
+          diff -u apps/desktop/THIRD_PARTY_LICENSES.md "$RUNNER_TEMP/desktop.md" || {
+            echo "::error::Stale apps/desktop/THIRD_PARTY_LICENSES.md: run python scripts/gen_licenses.py --workspace apps/desktop --out apps/desktop/THIRD_PARTY_LICENSES.md."; exit 1; }

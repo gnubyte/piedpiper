@@ -11,6 +11,9 @@ LICENSE or THIRD_PARTY_NOTICES.md, or after regenerating THIRD_PARTY_LICENSES.md
 
     python bindings/sync_notices.py           # refresh the copies in bindings/js and bindings/python
     python bindings/sync_notices.py --check   # only report missing or stale copies (exit status 1)
+
+CI's notices job (.github/workflows/ci.yml) and release.yml's version gate run --check, so stale
+copies fail the build instead of shipping.
 """
 import os
 import shutil
