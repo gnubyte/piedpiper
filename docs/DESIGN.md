@@ -436,8 +436,12 @@ files where nothing can be recoded, so they take the fast store path.
 On phone footage (Pixel, 1080p and 4K) HEVC comes out 6-10% smaller and on rendered footage
 from a GPU encoder about 10%, with every slice recoded. That is less than for H.264 because
 HEVC's own CABAC contexts already capture more (position classes, coded neighbouring
-sub-blocks, earlier greater-1 flags). The real streams tested so far use P slices only; B
-slices, tiles, wavefronts, sign hiding and dependent slices are covered by synthetic streams.
+sub-blocks, earlier greater-1 flags). The parser was checked against 102 JCT-VC conformance
+bitstreams covering B slices, wavefronts, tiles, dependent slices, entry points, sign hiding,
+AMP, weighted prediction, scaling lists, lossless coding, reference picture set variants and
+odd picture sizes: all round-trip byte-identical, and every slice recodes (15,832 slices,
+12,786 of them B) except the 6 that contain PCM coding units. `scripts/hevc_conformance.py`
+repeats the check on downloaded streams.
 
 ### VP9
 

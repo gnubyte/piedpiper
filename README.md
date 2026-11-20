@@ -229,7 +229,8 @@ context-mixing model, and rebuilds the original bitstream bit for bit on decompr
 
 The HEVC phone clips come from a Pixel phone. The HEVC trailer was re-encoded with a GPU
 encoder that pads to a constant bitrate with filler data (16% of the file), which xz removes
-too; its HEVC slice data alone shrinks 10.9%. ¹xz -6 on the first 100 MB. ²xz -9e on four of the files (90 MB). The VP9 clips are Windows' display-settings
+too; its HEVC slice data alone shrinks 10.9%. On 102 HEVC conformance test streams every slice
+recodes except the few that use PCM blocks. ¹xz -6 on the first 100 MB. ²xz -9e on four of the files (90 MB). The VP9 clips are Windows' display-settings
 samples and a game client's UI animations; the calibration clip repeats 887 of its 1,046
 frames byte for byte, and repeated frames are stored as references to the earlier copy.
 
