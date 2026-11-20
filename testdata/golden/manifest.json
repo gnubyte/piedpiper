@@ -165,8 +165,8 @@
     "compressed": "audio-wav.bin.pp",
     "flags": "--d-model 32 --layers 1 --heads 2 --d-ff 48 --window 24 --seg 6 --streams 2 --lr 3e-3",
     "input_sha256": "a924555932e23b868dec7eb99d1066b4b17451c94adcbda9ae6d808b9d2f4391",
-    "compressed_sha256": "18624f524a25b1c96b37ccfba2c8e6d2eb984470f29c340cb13f97642d40eaba",
+    "compressed_sha256": "db84bab91878be8af177c0a9d535edcde6f6a805310fc87c578a1835e6b11639",
     "input_size": 24074,
-    "compressed_size": 9842
+    "compressed_size": 8847
   }
 ]

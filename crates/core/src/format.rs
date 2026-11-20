@@ -6,7 +6,7 @@
 //! mode 1 (neural): tokenizer | model config | train config | n_tokens varint | payload
 //! mode 2 (media):  H.264 recompression stream (crates/media)
 //! mode 3 (jpeg):   Lepton JPEG recompression stream (third_party/lepton_jpeg)
-//! mode 5 (audio):  PCM audio header | meta stream | residual stream (audio.rs)
+//! mode 5 (audio):  PCM audio header | meta stream | coded residuals (audio/)
 //! ```
 
 use crate::config::{ModelConfig, TrainConfig};
@@ -23,8 +23,8 @@ pub const MODE_MEDIA: u8 = 2;
 /// plain stream (both complete PiedPiper streams).
 pub const MODE_DEFLATE: u8 = 4;
 pub const MODE_JPEG: u8 = 3;
-/// 16-bit PCM WAV audio: sample layout, then the WAV header/trailer bytes and the
-/// prediction residuals as two complete PiedPiper streams (see `audio.rs`).
+/// 16-bit PCM WAV audio: sample layout, predictor and coder, then the WAV header/trailer
+/// bytes as a complete PiedPiper stream and the coded prediction residuals (see `audio/`).
 pub const MODE_AUDIO: u8 = 5;
 
 pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {

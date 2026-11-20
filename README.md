@@ -304,26 +304,29 @@ milliseconds, instead of spending hours in the neural model to save next to noth
 `--no-video` (CLI) or `CompressOptions::media = false` (Rust) turns both off. See
 [docs/DESIGN.md](docs/DESIGN.md#video-h264-and-hevc-recompression-format-mode-2).
 
-**Audio files** (WAV with 16-bit samples, mono or stereo) get a classical front-end first
-(format mode 5). On raw samples a byte-level model loses to FLAC: audio's redundancy is
+**Audio files** (WAV with 16-bit samples, mono or stereo) get a dedicated lossless-audio
+path (format mode 5). On raw samples a byte-level model loses to FLAC: audio's redundancy is
 linear prediction, which a network learning from a single file does not discover.
 PiedPiper turns stereo into mid and side, predicts each sample with a cascade of adaptive
-filters (normalised LMS, as in Monkey's Audio), and has the network code only the
-prediction errors:
+filters (normalised LMS, as in Monkey's Audio and OptimFROG), switches to a predictor fitted
+to the block (as in FLAC) where that does better, and codes the prediction errors with a
+small context-mixing model:
 
 | file | length | FLAC -8 | PiedPiper `--no-audio` | PiedPiper |
 |---|---:|---:|---:|---:|
-| speech (synthesised), 22 kHz mono | 31 s | 46.4% | 53.0% | **42.7%** |
-| music (decoded MP3), 44.1 kHz stereo | 8 s | 23.9% | 34.6% | **22.6%** |
-| ringtone, 22 kHz stereo | 13 s | 49.0% | 53.0% | 49.3% |
+| speech (synthesised), 22 kHz mono | 31 s | 46.2% | 53.0% | **41.2%** |
+| music (decoded MP3), 44.1 kHz stereo | 8 s | 23.9% | 34.6% | **21.1%** |
+| ringtone, 22 kHz stereo | 13 s | 49.0% | 53.0% | **46.3%** |
 
-Sizes are % of the WAV file (FLAC -8 estimated). That is 6–8% below FLAC's strongest
-setting on speech and music and level with it on the ringtone. Clips of a few seconds land
-within 3.5% of FLAC either way, since the network has little to learn from, and
-text-like ratios are out of reach for any lossless coder because the low bits of every
-recording are noise. Speed is that of other input of the same size. `--no-audio` (CLI) or
-`CompressOptions::audio = false` (Rust) turns it off; `--prior` applies to the prediction
-errors, and `piedpiper train` on WAV files trains such a prior. See
+Sizes are % of the WAV file at the default level (FLAC -8 estimated): 6–12% below FLAC's
+strongest setting. On the 77 clips the filters were tuned on (system sounds, speech, music
+excerpts) it came out 20% below FLAC, and on 87 other clips (mostly short synthesised game
+sound effects) 7% below, smaller than FLAC on every file. It runs at about 5 MB/s
+each way on one core (a 3-minute song in 7 seconds); `-1` is twice as fast, `-4` to `-9`
+slightly smaller and slower. Text-like ratios are out of reach for any lossless coder,
+because the low bits of every recording are noise. `--no-audio` (CLI) or
+`CompressOptions::audio = false` (Rust) turns it off; with `--prior` the network codes the
+prediction errors instead, and `piedpiper train` on WAV files trains such a prior. See
 [docs/DESIGN.md](docs/DESIGN.md#audio-pcm-prediction-format-mode-5).
 
 

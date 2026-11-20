@@ -424,14 +424,19 @@ followed by:
 
 | field | type | notes |
 |---|---|---|
-| audio version | u8 | `1`: the predictor and residual layout below |
+| audio version | u8 | `2` (version `1`, at the end of this section, still decodes) |
 | channels | u8 | `1` or `2` |
 | bits | u8 | `16` |
+| predictor | u8 | preset `0`, `1` or `2` (below) |
+| coder | u8 | `0` = context-mixing coder, `1` = neural stream |
 | frames | varint | sample frames (one sample per channel) |
 | header length | varint | bytes of the original file before the first sample |
 | meta length | varint | length of the meta stream |
 | meta stream | bytes | complete PiedPiper stream (mode 0 or 1) of `meta` |
-| residual stream | bytes | complete PiedPiper stream (mode 0 or 1) of the residuals, until the end |
+| residuals | bytes | until the end: coder `0`, the arithmetic-coded residuals; coder `1`, a complete PiedPiper stream (mode 0 or 1) of the residual bytes |
+
+The encoder uses preset `0` at level 1, `1` at levels 2–3 and `2` at levels 4–9, and coder
+`1` only when it is given a prior. With coder `1` every block uses the cascade.
 
 `meta` holds every byte of the original file that is not a sample: the first `header
 length` bytes (everything up to and including the `data` chunk header), then everything
@@ -439,19 +444,120 @@ after the last whole frame (trailing chunks, a dangling odd byte). The original 
 `meta[..header length] ‖ samples ‖ meta[header length..]`, the samples being `frames ×
 channels` interleaved little-endian i16.
 
-**Residuals.** One integer residual `r` per sample, in frame order, channel 0 first. Each
-is written as its zigzag value `u = (r << 1) ^ (r >> 63)` in two bytes, most significant
-first; `u ≥ 0xFFFF` is written as `FF FF` followed by `u` in three bytes, most significant
-first.
-
-**Reconstruction.** For each frame and each channel `c`: read `r`, compute the prediction
-`p` (below), then `e0 = r + p` and `x = prev + e0`, where `prev` is the channel's previous
-`x` (0 before the first frame). Mono `x` is the sample. Stereo channels are mid and side:
+**Reconstruction.** One integer residual `r` per sample, in frame order, channel 0 first.
+For each frame and each channel `c`, the value is `x = b + r`. In a block that uses a block
+predictor (below), `b` is its prediction; otherwise `b = prev + p`, where `p` is the
+cascade's prediction (below) and `prev` is the channel's previous `x` (0 before the first
+frame). The cascade is updated with every `x`, in every block. Mono `x` is the sample. Stereo channels are mid and side:
 `R = x0 − (x1 >> 1)`, `L = x1 + R` (arithmetic shift). Mid and mono values must lie in
 `[−32768, 32767]`, side values in `[−65535, 65535]`, and L and R in the i16 range.
 
-**Prediction.** Each channel has a cascade of three normalised-LMS filters over IEEE-754
-binary64 values. Weights and histories start at zero; histories are most recent first.
+**Residual bytes** (coder `1`, and version 1). Each residual is written as its zigzag value
+`u = (r << 1) ^ (r >> 63)` in two bytes, most significant first; `u ≥ 0xFFFF` is written as
+`FF FF` followed by `u` in three bytes, most significant first.
+
+**Prediction.** Each channel runs its own cascade of normalised-LMS stages over IEEE-754
+binary64 values. Stage 1 sees the channel's past first differences `e0` (integers); every
+later stage sees the past errors of the stage before it. Weights and histories start at
+zero; histories are most recent first.
+
+| preset | stages (taps @ step size `mu`) |
+|---|---|
+| 0 | 256 @ 0.032, 32 @ 0.02, 16 @ 0.025, 8 @ 0.03 |
+| 1 | 512 @ 0.008, 256 @ 0.032, 32 @ 0.02, 16 @ 0.025, 8 @ 0.03 |
+| 2 | 1024 @ 0.008, 256 @ 0.032, 32 @ 0.02, 16 @ 0.025, 8 @ 0.03 |
+
+*Sums.* `w·h = Σ w[i]·h[i]` and `h·h` are summed in a fixed order: eight partial sums
+`s[0..8]` start at `0.0`, and for ascending `i` below the largest multiple of 8, element `i`
+is added to `s[i mod 8]`; then `s[j] += s[j+4]` for `j < 4`, `s[j] += s[j+2]` for `j < 2`,
+`s[0] += s[1]`; then the remaining elements are added to `s[0]` in ascending order.
+
+*Predict.* Stage `k` outputs `p_k = w_k·h_k`. The prediction is
+`p = round(clamp(((p_1 + p_2) + p_3) + …, −2²⁰, 2²⁰))`, rounding half away from zero.
+
+*Update*, once `x` is known: `e0 = x − prev`. Stage 1's target is `t_1 = e0`; stage `k`'s
+error is `t_k − p_k`, and stage `k+1`'s target is that error. Each stage steps
+`w[i] += g · h[i]` with `g = ((mu · s) · error) / pw`, then pushes its target onto its
+history. For stage 1, `pw = 1.0 + q`, where `q` is the exact integer sum of squares of its
+history (below 2⁵³, so it converts exactly); for later stages `pw = 1.0 + h·h`. The step
+scale is `s = 1.0 + 8192.0 / (n + 2048.0)`, where `n` is the number of whole frames before
+the current one: steps start five times larger and decay to their base sizes.
+
+**Block predictors** (coder `0`). Frames form blocks of 4096 (the last may be shorter). Each
+block starts with a header per channel (see the coder): a flag and, if it is set, a
+predictor for that block with order `n` (0 to 32), shift `s` (0 to 15) and `n` coefficients
+`q[j]` (15-bit two's complement). Its prediction is
+`clamp((Σ q[j] · x[t−1−j]) >> s, −2²⁰, 2²⁰)` in 64-bit integers (arithmetic shift), where
+`x[t−1−j]` are the channel's earlier values (mid, side or mono), 0 before the first frame.
+The encoder fits them to each block (Welch-windowed autocorrelation, Levinson-Durbin,
+quantisation, as in FLAC) and sets the flag where they beat the cascade; a decoder only
+applies them.
+
+**Context-mixing coder** (coder `0`). Integers only; divisions below round down (arithmetic
+shifts).
+
+*Arithmetic coder.* State `x1 = 0`, `x2 = 2³² − 1`. A bit `b` with `P(1) = p / 65536`
+(`0 < p < 65536`) is coded with `mid = x1 + ⌊(x2 − x1) · p / 65536⌋` (64-bit product):
+`b = 1` sets `x2 = mid`, `b = 0` sets `x1 = mid + 1`. While the top bytes of `x1` and `x2`
+are equal, the encoder outputs the top byte of `x2` and shifts: `x1 = x1 << 8`,
+`x2 = (x2 << 8) | 255` (32 bits). At the end it outputs the top byte of `x1`. The decoder
+starts with `x` = the first four bytes, most significant first, decodes `b = 1` if
+`x ≤ mid`, and shifts in the next byte (`FF` past the end) wherever the encoder shifted
+one out.
+
+*Adaptive bit.* A probability `p` (starts at 32768) and a count `n` (starts at 0). After
+coding `b`: `p += ⌊(T − p) · R[n] / 65536⌋` with `T = 65535` for a 1 and `0` for a 0,
+clamped to `[32, 65504]`; then `n += 1` up to 255. `R[n] = ⌊(131072 + ⌊(2n + 3) / 2⌋) /
+(2n + 3)⌋`.
+
+*Channel state.* Each channel has its own models, mixer weights and three running averages
+of `16·|r|`: `A_f`, `A_s`, `A_v`, all starting at 256, and the sign of its previous
+residual: negative, zero or positive (starting at zero).
+
+*Contexts.* `bucket(a) = min(4·(l − 4) + ⌊v / 2^(l−2)⌋ mod 4, 95)` with
+`v = max(a, 0) + 16` and `l = ⌊log2 v⌋`. Then `q = bucket(A_f)`,
+`e0 = min(len(⌊(A_f + 8) / 16⌋), 22)`, and `ρ_s`, `ρ_v` =
+`clamp(bucket(A) − 4·e0 + 16, 0, 31)` for `A_s` and `A_v`. `len(u)` is the bit length of
+`u` (0 for 0).
+
+*Block headers.* At the start of each block, before its first residual, one header per
+channel in channel order: the flag, with an adaptive bit of that channel; then, if it is
+set, the order (6 bits), the shift (4 bits) and each coefficient (15 bits), most
+significant bit first, each bit coded with `p = 32768`. Orders above 32 are invalid.
+
+*Binarisation* of a residual `r`, with `u = |r|` and `e = len(u)`:
+
+1. If `e0 > 0`, the mixed decision `e ≥ e0` (slot 0). If yes, for `j = e0, e0 + 1, …` below
+   23, the mixed decision `e > j` (slot `1 + min(j − e0, 7)`), stopping at the first 0
+   (`e = j`); `e = 23` if all are 1. If no, for `j = e0 − 1` down to 1, the mixed decision
+   `e < j` (slot `9 + min(e0 − 1 − j, 7)`), stopping at the first 0 (`e = j`); `e = 0` if
+   all are 1. If `e0 = 0`, the first decision is skipped as yes.
+2. If `e ≥ 2`: bit `e − 2` of `u`, mixed (index `e`). If `e ≥ 3`: bit `e − 3` with the
+   adaptive bit `[q][e][bit e − 2]`; then bits `e − 4` down to 0 with `[e][position]`.
+3. If `u ≠ 0`: the sign (1 = negative) with `[previous sign][min(e, 7)]`.
+
+Afterwards `A_f += ⌊(16u − A_f) / 16⌋`, `A_s += ⌊(16u − A_s) / 128⌋`,
+`A_v += ⌊(16u − A_v) / 2⌋`, and the previous sign becomes the sign of `r`.
+
+*Mixed decisions.* The `e` decisions (17 slots) and the bit under the leading one (24
+indices) each have three tables of adaptive bits, indexed `[q][s]`, `[ρ_s][s]` and
+`[ρ_v][s]`. Their probabilities `p_a, p_b, p_c` give the inputs `st = stretch(⌊p / 16⌋)`,
+plus a fourth input fixed at 256. The mixer weights `w` (four per selector, starting at
+19660) are selected by the slot, or by `17 + e` for the bit under the leading one:
+`d = clamp(⌊Σ w·st / 65536⌋, −2047, 2047)`, `p12 = squash(d)`, and the bit is coded with
+`p = 16 · p12`. Then `err = ((b << 12) − p12) · 16`, each `w += ⌊st · err / 32768⌋`, and the
+three adaptive bits learn `b`.
+
+`squash(d)` is 4095 above 2047 and 1 below −2047; otherwise, with `T = [1, 2, 3, 6, 10, 16,
+27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901,
+3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094]`, `w = d mod 128` and
+`i = ⌊d / 128⌋ + 16`, it is `(T[i]·(128 − w) + T[i+1]·w + 64) >> 7` clamped to
+`[1, 4095]`. `stretch(p)` for `p` in `0..4096` is the smallest `d` in `[−2047, 2047]` with
+`squash(d) ≥ p`, or 2047 if there is none.
+
+**Version 1** (decode only). After the bits byte come frames, header length, meta length,
+the meta stream and a neural stream (mode 0 or 1) of residual bytes; there is no predictor
+or coder byte. The predictor is one cascade of three normalised-LMS filters:
 
 | stage | input history `h` | output | step size `mu` |
 |---|---|---|---|
@@ -465,8 +571,10 @@ channel 1's values up to the previous frame. Each `pk = Σ w[i]·h[i]`, summed f
 rounding half away from zero. After the sample is known, each stage updates with its own
 error (`e1`, `e2`, `e3 = e2 − p3`): `g = (mu · e) / pw`, where `pw = 1.0 + h[0]² + h[1]² +
 …` is summed in order, then `w[i] += g · h[i]`. Then `e0`, `e1` and `e2` are pushed onto the
-histories of stages 1, 2 and 3. The reference implementation is `crates/core/src/audio.rs`;
-`testdata/golden/audio-wav.bin.pp` checks it.
+histories of stages 1, 2 and 3.
+
+The reference implementation is `crates/core/src/audio/`. `testdata/golden/audio-wav.bin.pp`
+checks version 2, and `crates/core/tests/data/audio-v1.wav.pp` version 1.
 
 ## Prior (`.ppp`)
 

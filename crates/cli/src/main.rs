@@ -409,7 +409,7 @@ fn describe(info: &piedpiper::Info) -> String {
         _ if info.tokenizer == "hevc-ts-recode" => "HEVC transport stream, CABAC layer recompressed losslessly".into(),
         _ if info.tokenizer == "jpeg-lepton" => "JPEG, DCT coefficients recompressed losslessly (Lepton)".into(),
         _ if info.tokenizer == "deflate-recode" => "deflate streams (PNG/ZIP/gzip/PDF) expanded and recompressed".into(),
-        _ if info.tokenizer == "pcm-audio" => "16-bit PCM audio, adaptive prediction residuals coded by the neural model".into(),
+        _ if info.tokenizer == "pcm-audio" => "16-bit PCM audio, coded as adaptive prediction residuals".into(),
         _ => "stored (incompressible)".into(),
     };
     let s = match &info.filter {

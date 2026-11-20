@@ -621,67 +621,104 @@ out 8–45% larger than with FLAC. Byte order is not the cause (storing the samp
 significant byte first changed nothing). The redundancy in audio is linear: each sample is
 close to a weighted sum of the ones before it, with weights that drift as the sound
 changes, and a network that learns from one file does not discover linear prediction over
-pairs of bytes. Lossless audio codecs are built around such a predictor, so mode 5
-(`crates/core/src/audio.rs`) puts one in front of the network:
+pairs of bytes. Mode 5 (`crates/core/src/audio/`) therefore codes audio the way dedicated
+lossless audio codecs do:
 
 1. Parse the RIFF/WAVE file (16-bit PCM, mono or stereo). Every byte that is not a sample
    (the header, trailing chunks such as `LIST` metadata, a dangling odd byte) goes into a
    separate *meta* stream, so text metadata does not disturb the statistics of the samples.
 2. Turn stereo into mid and side with an integer lifting step (`s = L − R`,
    `m = R + (s >> 1)`), which inverts exactly.
-3. Predict each channel's next sample with a cascade of three normalised-LMS filters, the
-   structure Monkey's Audio uses: 32 taps over the channel's own history plus 16 over the
-   other channel's, then 16 and 4 taps over what the earlier stages missed. All three adapt
-   after every sample, so the predictor follows the sound without side information.
-4. Code the prediction errors with the network, as a second stream: zigzag-mapped, two
-   bytes per sample, most significant first, with an escape for the rare large ones.
+3. Predict each channel's next sample with a cascade of normalised-LMS filters (the
+   structure of Monkey's Audio and OptimFROG): a slow 512-tap stage, a fast 256-tap stage,
+   then 32, 16 and 8 taps over what the earlier stages missed. All adapt after every sample,
+   so the predictor follows the sound without side information. Their steps start five
+   times larger and decay over the first few thousand frames, so short files converge.
+4. For each block of 4096 frames and each channel, fit a linear predictor to the block itself
+   (as FLAC does) and use it instead of the cascade where its errors are cheaper. Its
+   coefficients go in the stream; the cascade keeps learning either way.
+5. Code the prediction errors with a small context-mixing model driving a binary arithmetic
+   coder: each error's bit length is coded relative to the recent average, under three
+   adaptive models (conditioned on fast, slow and very fast averages of recent magnitudes)
+   mixed by an online-learned logistic mixer, as in the PAQ family.
 
 Measured at level 2 (size as % of the WAV file, lower is better):
 
-| file | FLAC -8 | raw samples (`--no-audio`) | mode 5 | mode 5 + audio prior |
+| file | FLAC -8 | raw samples (`--no-audio`) | network codes the errors (0.1) | mode 5 |
 |---|---:|---:|---:|---:|
-| speech (synthesised), 22 kHz mono, 31 s | 46.4% | 53.0% | **42.7%** | 42.3% |
-| music (decoded MP3), 44.1 kHz stereo, 8 s | 23.9% | 34.6% | **22.6%** | 22.2% |
-| ringtone, 22 kHz stereo, 13 s | 49.0% | 53.0% | 49.3% | 48.6% |
+| speech (synthesised), 22 kHz mono, 31 s | 46.2% | 53.0% | 42.7% | **41.2%** |
+| music (decoded MP3), 44.1 kHz stereo, 8 s | 23.9% | 34.6% | 22.6% | **21.1%** |
+| ringtone, 22 kHz stereo, 13 s | 49.0% | 53.0% | 49.3% | **46.3%** |
 
 The FLAC -8 sizes are estimated with a reimplementation of FLAC's LPC and Rice-partition
-search; the FLAC encoder that ships with Windows came out 4–19% larger than that estimate.
+search; the FLAC encoder that ships with Windows came out larger than that estimate, by
+4–19% on these files and by more than the WAV itself on some short ones.
 
-- **The predictor does most of the work.** A plain adaptive Laplace coder on the same
-  residuals comes within 1% of the network (42.8 / 22.6 / 48.9%), and level 3 gains less
-  than 0.2% over level 2. The match models change the result by at most 0.2% (the default
-  short + long pair is marginally best, so the residual stream keeps it). What is left after
-  prediction is mostly noise, where a larger model has little to find.
-- **Short clips** of 1–3 seconds land within 3.5% of FLAC either way: the online model has
-  too little audio to learn from. A prior trained on residuals of similar material (other
-  tracks in the same style, the same synthetic voice, other system sounds; none of the test
-  files) saved a further 1–3%, most on short clips. None ships yet, because a general audio
-  prior needs a licensed training corpus. `piedpiper train` turns WAV inputs into their
-  residuals, so you can train your own.
+- **A coder instead of the network.** Version 1 of the mode (PiedPiper 0.1) had the
+  network code the prediction errors, two bytes per sample, at the network's usual speed.
+  A far simpler coder already did as well on those errors: with the version-1 predictor,
+  six test clips came to 1,683,029 bytes against the network's 1,683,015, and the final
+  coder is about 1% better again. What is left after
+  prediction is mostly noise whose loudness drifts; an adaptive model of that loudness
+  captures what can be captured, and a larger model finds nothing more. Mixing three
+  contexts gains 0.3% over one; an SSE stage and per-loudness mixer weights gain nothing.
+- **Longer filters, larger steps.** With the coder as a seconds-fast yardstick, the cascade
+  was tuned on 77 clips (Windows system sounds, synthesised speech, music excerpts): the
+  version-1 cascade (32 + 16 cross-channel, 16, 4 taps) to 512 + 256 + 32 + 16 + 8 taps,
+  step sizes up to ten times larger, and the boost at the start made them 13% smaller.
+  Cross-channel taps stopped helping once mid/side and the longer filters were in place, so
+  the channels are predicted independently. The step sizes are a compromise: the best
+  per file differs by up to 1%, and picking among three presets per file saved only
+  0.1–0.5%.
+- **Against FLAC.** 6–12% smaller on the files in the table and 20% smaller on the tuning
+  clips. On 87 other clips that played no part in tuning, mostly short synthesised game
+  sound effects and ambience loops, 7% smaller. Every one of the 164 files comes out
+  smaller than FLAC.
+- **Block predictors** cover what the cascade cannot learn in time. On nearly noise-free
+  synthetic tones the cascade's own adaptation is the noise floor: two synthesised hums came
+  out at 74% and 47% of the WAV, against FLAC's 36% and 37%. A predictor fitted to the block
+  takes them to 27% and 26%. Running such a predictor in front of the cascade made things
+  worse, because the cascade then adds its noise to an already white signal. Choosing per
+  block and channel, by an estimate of the Rice-coded size, keeps the best of both. It gains
+  1% on the 87 clips, makes no difference on music and speech (the cascade wins nearly every
+  block), costs one flag bit per block, and takes about 5% more time to compress (the
+  analysis runs on the thread pool), with no measurable effect on decompression. Orders up
+  to 16 do as well as 32.
+- **Levels** pick the cascade: level 1 drops the slow stage (about twice as fast, about 1%
+  larger on music, slightly smaller on speech), levels 4–9 make it 1024 taps (about 0.2%
+  smaller on music, slightly larger on speech, 1.4–1.6 times slower).
+- **Speed.** About 5 MB/s to compress and 5.5 MB/s to decompress at level 2 (a 3-minute
+  CD-quality song takes 7 seconds each way), about 10 MB/s at level 1: thousands of times
+  faster than the network coding the errors. The cascade dominates; its dot products keep
+  eight independent partial sums so the floating-point adds pipeline, and each update also
+  computes the next prediction in the same pass over the weights.
+- **Priors.** With `--prior` the network codes the errors instead, as in version 1, where a
+  prior trained on residuals of similar material saved 1–3% over the network without one,
+  which is about where the context-mixing coder lands. That is only worth trying on
+  material like the prior's training set, at network speed. `piedpiper train` turns WAV
+  inputs into their residuals.
 - **No text-like ratios.** The low bits of any recording (microphone, room, converter,
   dither) are noise, and noise does not compress, so lossless audio codecs all end up within
   a few percent of each other. The music sample compresses as well as it does because it
   was decoded from an MP3, which drops the top of the spectrum; a CD rip comes out larger
   with every codec.
 - **Determinism.** The predictor computes in binary64 with only `+ − × ÷` in a fixed order
-  and rounds by truncating and comparing the exact remainder, under the same pinned FP
-  environment as the network, so it predicts bit-identically everywhere. The `audio-wav`
-  golden vector checks it, and the encoder runs the inverse over its own residuals before
-  it uses mode 5.
-- **A stream mode, not a filter.** The residuals can be longer than the samples (large
-  errors are escaped), which the filter contract forbids, and the WAV header and metadata
-  are better coded apart from them.
+  (the partial sums are part of the format) and rounds by truncating and comparing the
+  exact remainder, under the same pinned FP environment as the network; the coder uses only
+  integers. The encoder's block analysis follows the same rules (integer autocorrelation,
+  binary64 Levinson-Durbin), so every encoder makes the same choices. The `audio-wav` golden vector checks version 2, a stored version-1 stream checks
+  the old decoder, and the encoder decodes its own residuals (on a second thread, a block
+  behind) before it uses mode 5.
+- **A stream mode, not a filter.** The residuals can need more bits than the samples, which
+  the filter contract forbids, and the WAV header and metadata are better coded apart from
+  them.
 - **Scope.** 16-bit PCM, mono or stereo, which covers CD audio and most recordings. 8-bit,
   24-bit and float samples, more than two channels and AIFF take the plain neural path;
   compressed audio (MP3, AAC, Ogg, FLAC) is recognised and stored as it is. WAV files
-  inside ZIP archives, Office documents and APKs reach mode 5 as embedded parts of mode 4
-  (a ZIP holding a one-second clip came out 1.3% larger than the bare WAV). `--no-audio`
-  (CLI) or `CompressOptions::audio = false` turns the mode off. Unlike the JPEG and video
-  modes it stays on with `--prior` or explicit model settings, which then apply to the
-  residual stream.
-- **Speed** is that of the neural path on a file of the same size, since the network codes
-  two bytes per sample; the predictor and its check add about 1.5 seconds per minute of
-  CD-quality stereo, under 1% of the network's time.
+  inside ZIP archives, Office documents and APKs reach mode 5 as embedded parts of mode 4.
+  `--no-audio` (CLI) or `CompressOptions::audio = false` turns the mode off. Unlike the JPEG
+  and video modes it stays on with `--prior` (which then codes the errors) or explicit model
+  settings (which apply to the meta stream).
 
 ## Performance notes
 
