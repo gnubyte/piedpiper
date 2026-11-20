@@ -326,7 +326,7 @@ too. The encoder scans the container bytes for AC-3 sync frames (`0B 77`, bsid 8
 whose two CRCs check out and that the frame parser handles; their bytes are left out of the
 header stream's container bytes. When there are any, the last segment is followed by: the
 number of AC-3 runs (varint), then per run its table bits (u8), length (varint) and stream.
-A run is consecutive frames (about 4 MB) coded with a fresh model: the frame count, the
+A run is consecutive frames (a new run starts once 8 MB of frames are in the current one) coded with a fresh model: the frame count, the
 offset of the first frame and, for each later frame, the gap since the previous frame's end
 (numbers), then each frame's bits from `fscod` on (the sync word, `crc1` and `crc2` are
 not coded), each coded in its syntax context by `crate::ac3`'s parser, which runs the A/52

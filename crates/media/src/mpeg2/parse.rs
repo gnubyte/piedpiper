@@ -1,7 +1,7 @@
 //! MPEG-2 video headers (ISO/IEC 13818-2 clause 6) and a slice parser that reads every bit
 //! through a [`BitIo`], together with a [`Hint`] saying where the bit sits: which syntax
 //! element, which node of its code tree, and the surrounding state the model can use.
-//! Code tables are annex B of the standard (as tabulated in FFmpeg's `mpeg12data.c`).
+//! Code tables are annex B of Rec. ITU-T H.262 (tables B.1 to B.4 and B.9 to B.15, checked code by code).
 
 use crate::bits::{Bad, BitReader, R};
 use crate::h264::mb::Hint;

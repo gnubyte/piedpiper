@@ -160,7 +160,11 @@ mod cx {
     pub const PCM: usize = 458;
 }
 
-// --- code tables (from FFmpeg's h264_cavlc.c; [TotalCoeff * 4 + TrailingOnes], len 0 = no code)
+// --- code tables of Rec. ITU-T H.264 (06/2026), checked code by code ----------------------------
+// TOKEN_* is coeff_token (table 9-5; one table per nC range, indexed [TotalCoeff * 4 +
+// TrailingOnes]) and CDC_TOKEN_* its nC = -1 column; TZ_* is total_zeros (tables 9-7 and 9-8),
+// CDC_TZ_* table 9-9 (a), RUN_* run_before (table 9-10), INTRA_CBP/INTER_CBP table 9-4. A length
+// of 0 means there is no code.
 
 const TOKEN_LEN: [[u8; 68]; 4] = [
     [
@@ -454,7 +458,10 @@ struct SubT {
     shape: u8,
 }
 
+/// Prediction of the two partitions of B mb_type 4 to 21, in pairs (1 = L0, 2 = L1, 3 = Bi;
+/// table 7-14).
 const B_PAIRS: [(u8, u8); 9] = [(1, 1), (2, 2), (1, 2), (2, 1), (1, 3), (2, 3), (3, 1), (3, 2), (3, 3)];
+/// sub_mb_type in B macroblocks as (prediction, shape), 0 = direct (table 7-18).
 const B_SUB: [(u8, u8); 13] =
     [(0, 0), (1, 0), (2, 0), (3, 0), (1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2), (1, 3), (2, 3), (3, 3)];
 /// Partitions as (x, y, w, h) in 4x4 blocks.
