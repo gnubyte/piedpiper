@@ -281,7 +281,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "piedpiper"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "lepton_jpeg",
  "miniz_oxide",
@@ -292,21 +292,21 @@ dependencies = [
 
 [[package]]
 name = "piedpiper-capi"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "piedpiper",
 ]
 
 [[package]]
 name = "piedpiper-cli"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "piedpiper",
 ]
 
 [[package]]
 name = "piedpiper-jni"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "jni",
  "piedpiper",
@@ -314,11 +314,11 @@ dependencies = [
 
 [[package]]
 name = "piedpiper-media"
-version = "0.1.0"
+version = "0.1.2"
 
 [[package]]
 name = "piedpiper-python"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "piedpiper",
  "pyo3",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "piedpiper-wasm"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "piedpiper",
 ]

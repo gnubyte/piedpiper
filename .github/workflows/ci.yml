@@ -137,4 +137,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Package versions agree
+        run: python3 scripts/check_version.py
       - run: cargo clippy -p piedpiper -p piedpiper-cli -- -D warnings -A clippy::needless_range_loop -A clippy::too_many_arguments

@@ -15,7 +15,8 @@ default-members = ["crates/core", "crates/cli"]
 exclude = ["third_party/lepton_jpeg"]
 
 [workspace.package]
-version = "0.1.0"
+# Keep in step with the other package versions; scripts/check_version.py checks them.
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 rust-version = "1.89"
