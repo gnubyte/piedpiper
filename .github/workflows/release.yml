@@ -19,7 +19,8 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-13, target: x86_64-apple-darwin }
+          # Cross-compiled on Apple Silicon: Intel macOS runners are being retired.
+          - { os: macos-latest, target: x86_64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
     steps:
