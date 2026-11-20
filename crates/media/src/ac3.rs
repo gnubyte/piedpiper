@@ -47,6 +47,40 @@ fn bin_to_band(bin: usize) -> usize {
     BAND_START.iter().rposition(|&s| (s as usize) <= bin).unwrap_or(0).min(49)
 }
 
+/// logadd() of ETSI TS 102 366 clause 6.2.2.3.
+fn logadd(a: i32, b: i32) -> i32 {
+    let c = a - b;
+    let address = (c.abs() >> 1).min(255) as usize;
+    if c >= 0 {
+        a + LOG_ADD[address] as i32
+    } else {
+        b + LOG_ADD[address] as i32
+    }
+}
+
+/// calc_lowcomp() of ETSI TS 102 366 clause 6.2.2.4.
+fn calc_lowcomp(a: i32, b0: i32, b1: i32, bin: usize) -> i32 {
+    if bin < 7 {
+        if b0 + 256 == b1 {
+            384
+        } else if b0 > b1 {
+            (a - 64).max(0)
+        } else {
+            a
+        }
+    } else if bin < 20 {
+        if b0 + 256 == b1 {
+            320
+        } else if b0 > b1 {
+            (a - 64).max(0)
+        } else {
+            a
+        }
+    } else {
+        (a - 128).max(0)
+    }
+}
+
 // --- CRC ---------------------------------------------------------------------------------------
 
 const fn crc_table() -> [u16; 256] {
@@ -478,10 +512,15 @@ impl<T: BitIo> Parser<'_, T> {
         }
         // rematrixing
         if acmod == 2 && self.side(1, 41, 0)? == 1 {
-            let mut n = 4;
-            if self.f.cplinu && self.f.cplstrt <= 61 {
-                n -= 1 + (self.f.cplstrt == 37) as usize;
-            }
+            // number of rematrixing bands (table 4.10)
+            let cplbegf = (self.f.cplstrt.max(37) - 37) / 12;
+            let n = if !self.f.cplinu || cplbegf > 2 {
+                4
+            } else if cplbegf > 0 {
+                3
+            } else {
+                2
+            };
             for b in 0..n {
                 self.side(1, 42, b)?;
             }
@@ -678,146 +717,131 @@ impl<T: BitIo> Parser<'_, T> {
         Ok(())
     }
 
+    /// The parametric bit allocation of ETSI TS 102 366 clause 6.2.2 for channel slot `s`
+    /// (mantissas `start..end`), step by step as in its pseudo-code and with its variable names:
+    /// exponents to psd (6.2.2.2), psd integration into bands (6.2.2.3), the excitation function
+    /// (6.2.2.4), the masking curve (6.2.2.5), delta bit allocation (6.2.2.6) and the bap of each
+    /// mantissa (6.2.2.7).
     fn bit_alloc(&mut self, s: usize, start: usize, end: usize) -> R<()> {
         if end <= start || end > 253 {
             return Err(Bad);
         }
         let f = &mut self.f;
+        // 6.2.2.2
         let mut psd = [0i32; 256];
-        let mut band_psd = [0i32; 50];
         for bin in start..end {
             psd[bin] = 3072 - ((f.dexps[s][bin] as i32) << 7);
         }
-        let mut bin = start;
-        while bin < end.min(28) {
-            band_psd[bin] = psd[bin];
-            bin += 1;
-        }
-        if bin < end {
-            let mut band = bin_to_band(bin);
-            loop {
-                let mut v = psd[bin];
-                bin += 1;
-                let band_end = (BAND_START[band + 1] as usize).min(end);
-                while bin < band_end {
-                    let p = psd[bin];
-                    let max = v.max(p);
-                    let adr = (max - ((v + p + 1) >> 1)).min(255) as usize;
-                    v = max + LOG_ADD[adr] as i32;
-                    bin += 1;
-                }
-                band_psd[band] = v;
-                band += 1;
-                if end <= BAND_START[band] as usize {
-                    break;
-                }
+        // 6.2.2.3 (bndtab[k] + bndsz[k] is BAND_START[k + 1]; masktab[bin] is bin_to_band(bin))
+        let mut bndpsd = [0i32; 50];
+        let mut j = start;
+        let mut k = bin_to_band(start);
+        loop {
+            let lastbin = (BAND_START[k + 1] as usize).min(end);
+            bndpsd[k] = psd[j];
+            j += 1;
+            while j < lastbin {
+                bndpsd[k] = logadd(bndpsd[k], psd[j]);
+                j += 1;
+            }
+            k += 1;
+            if end <= lastbin {
+                break;
             }
         }
-        // excitation and masking curve
-        let fast_gain = f.fgain[s];
-        let is_lfe = s == LFE;
-        let band_start = bin_to_band(start);
-        let band_end = bin_to_band(end - 1) + 1;
+        // 6.2.2.4
+        let (fgain, sgain, fdecay, sdecay) = (f.fgain[s], f.sgain, f.fdecay, f.sdecay);
+        let bndstrt = bin_to_band(start);
+        let bndend = bin_to_band(end - 1) + 1;
         let mut excite = [0i32; 50];
-        let lowcomp1 = |a: i32, b0: i32, b1: i32, c: i32| -> i32 {
-            if b0 + 256 == b1 {
-                c
-            } else if b0 > b1 {
-                (a - 64).max(0)
-            } else {
-                a
-            }
-        };
-        let (mut fastleak, mut slowleak);
-        let begin;
-        if band_start == 0 {
-            let mut lowcomp = lowcomp1(0, band_psd[0], band_psd[1], 384);
-            excite[0] = band_psd[0] - fast_gain - lowcomp;
-            lowcomp = lowcomp1(lowcomp, band_psd[1], band_psd[2], 384);
-            excite[1] = band_psd[1] - fast_gain - lowcomp;
-            let mut b0 = 7;
-            fastleak = 0;
-            slowleak = 0;
-            for band in 2..7 {
-                if !(is_lfe && band == 6) {
-                    lowcomp = lowcomp1(lowcomp, band_psd[band], band_psd[band + 1], 384);
+        let (mut fastleak, mut slowleak) = (0i32, 0i32);
+        let mut begin;
+        if bndstrt == 0 {
+            // full-bandwidth and lfe channels; calc_lowcomp() is skipped for bin 6 of the lfe
+            // channel (the only one with bndend 7)
+            let skip = |bin: usize| bndend == 7 && bin == 6;
+            let mut lowcomp = calc_lowcomp(0, bndpsd[0], bndpsd[1], 0);
+            excite[0] = bndpsd[0] - fgain - lowcomp;
+            lowcomp = calc_lowcomp(lowcomp, bndpsd[1], bndpsd[2], 1);
+            excite[1] = bndpsd[1] - fgain - lowcomp;
+            begin = 7;
+            for bin in 2..7 {
+                if !skip(bin) {
+                    lowcomp = calc_lowcomp(lowcomp, bndpsd[bin], bndpsd[bin + 1], bin);
                 }
-                fastleak = band_psd[band] - fast_gain;
-                slowleak = band_psd[band] - f.sgain;
-                excite[band] = fastleak - lowcomp;
-                if !(is_lfe && band == 6) && band_psd[band] <= band_psd[band + 1] {
-                    b0 = band + 1;
+                fastleak = bndpsd[bin] - fgain;
+                slowleak = bndpsd[bin] - sgain;
+                excite[bin] = fastleak - lowcomp;
+                if !skip(bin) && bndpsd[bin] <= bndpsd[bin + 1] {
+                    begin = bin + 1;
                     break;
                 }
             }
-            let end1 = band_end.min(22);
-            for band in b0..end1 {
-                if !(is_lfe && band == 6) {
-                    lowcomp = if band < 7 {
-                        lowcomp1(lowcomp, band_psd[band], band_psd[band + 1], 384)
-                    } else if band < 20 {
-                        lowcomp1(lowcomp, band_psd[band], band_psd[band + 1], 320)
-                    } else {
-                        (lowcomp - 128).max(0)
-                    };
+            for bin in begin..bndend.min(22) {
+                if !skip(bin) {
+                    lowcomp = calc_lowcomp(lowcomp, bndpsd[bin], bndpsd[bin + 1], bin);
                 }
-                fastleak = (fastleak - f.fdecay).max(band_psd[band] - fast_gain);
-                slowleak = (slowleak - f.sdecay).max(band_psd[band] - f.sgain);
-                excite[band] = (fastleak - lowcomp).max(slowleak);
+                fastleak = (fastleak - fdecay).max(bndpsd[bin] - fgain);
+                slowleak = (slowleak - sdecay).max(bndpsd[bin] - sgain);
+                excite[bin] = (fastleak - lowcomp).max(slowleak);
             }
             begin = 22;
         } else {
-            begin = band_start;
+            // coupling channel, with the leak values of 6.2.2.1
             fastleak = (f.cplfleak << 8) + 768;
             slowleak = (f.cplsleak << 8) + 768;
+            begin = bndstrt;
         }
-        for band in begin..band_end {
-            fastleak = (fastleak - f.fdecay).max(band_psd[band] - fast_gain);
-            slowleak = (slowleak - f.sdecay).max(band_psd[band] - f.sgain);
-            excite[band] = fastleak.max(slowleak);
+        for bin in begin..bndend {
+            fastleak = (fastleak - fdecay).max(bndpsd[bin] - fgain);
+            slowleak = (slowleak - sdecay).max(bndpsd[bin] - sgain);
+            excite[bin] = fastleak.max(slowleak);
         }
+        // 6.2.2.5
         let mut mask = [0i32; 50];
-        for band in band_start..band_end {
-            let tmp = f.dbknee - band_psd[band];
-            if tmp > 0 {
-                excite[band] += tmp >> 2;
+        for bin in bndstrt..bndend {
+            if bndpsd[bin] < f.dbknee {
+                excite[bin] += (f.dbknee - bndpsd[bin]) >> 2;
             }
-            mask[band] = (HTH[band][f.fscod] as i32).max(excite[band]);
+            mask[bin] = excite[bin].max(HTH[bin][f.fscod] as i32);
         }
+        // 6.2.2.6, for deltbae 0 (reuse) and 1 (new). The first offset counts from the channel's
+        // first band (for the coupling channel, its first band: 4.4.3.51).
         if f.dba_mode[s] <= 1 {
-            let mut band = band_start;
+            let mut band = bndstrt;
             for seg in 0..f.dba_nseg[s].min(8) {
-                let (off, len, val) = f.dba[s][seg];
-                band += off as usize;
-                if band >= 50 || len as usize > 50 - band {
+                let (deltoffst, deltlen, deltba) = f.dba[s][seg];
+                band += deltoffst as usize;
+                if band >= 50 || deltlen as usize > 50 - band {
                     return Err(Bad);
                 }
-                let delta = if val >= 4 { (val as i32 - 3) * 128 } else { (val as i32 - 4) * 128 };
-                for _ in 0..len {
+                let delta = if deltba >= 4 { (deltba as i32 - 3) << 7 } else { (deltba as i32 - 4) << 7 };
+                for _ in 0..deltlen {
                     mask[band] += delta;
                     band += 1;
                 }
             }
         }
-        // bit allocation pointers
-        let snr = f.snroffset[s];
-        if snr == -960 {
+        // 6.2.2.7. 6.2.2.1 gives no mantissas at all when every snr offset of the block is zero;
+        // this parser applies that per channel (snroffset -960 is csnroffst = fsnroffst = 0).
+        let snroffset = f.snroffset[s];
+        if snroffset == -960 {
             f.bap[s] = [0; 256];
             return Ok(());
         }
         let floor = f.floor;
-        let mut bin = start;
-        let mut band = bin_to_band(start);
+        let mut i = start;
+        let mut j = bin_to_band(start);
         loop {
-            let m = (((mask[band] - snr - floor).max(0)) & 0x1FE0) + floor;
-            band += 1;
-            let band_end = (BAND_START[band] as usize).min(end);
-            while bin < band_end {
-                let address = ((psd[bin] - m) >> 5).clamp(0, 63) as usize;
-                f.bap[s][bin] = BAP_TAB[address];
-                bin += 1;
+            let lastbin = (BAND_START[j + 1] as usize).min(end);
+            let m = ((mask[j] - snroffset - floor).max(0) & 0x1fe0) + floor;
+            while i < lastbin {
+                let address = ((psd[i] - m) >> 5).clamp(0, 63) as usize;
+                f.bap[s][i] = BAP_TAB[address];
+                i += 1;
             }
-            if end <= band_end {
+            j += 1;
+            if end <= lastbin {
                 break;
             }
         }

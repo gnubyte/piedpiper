@@ -95,6 +95,9 @@ impl Vlc {
     }
 }
 
+/// macroblock_address_increment codes for increments 1 to 33 and macroblock_escape (table B.1),
+/// then macroblock_stuffing, which exists only in MPEG-1 (ISO/IEC 11172-2): the note under H.262
+/// table B.1 says MPEG-2 does not have it, and the parser rejects a slice that uses it.
 const MBA_TABLE: [(u8, u8); 35] = [
     (0x1, 1), (0x3, 3), (0x2, 3), (0x3, 4), (0x2, 4), (0x3, 5), (0x2, 5), (0x7, 7), (0x6, 7), (0xb, 8), (0xa, 8), (0x9, 8),
     (0x8, 8), (0x7, 8), (0x6, 8), (0x17, 10), (0x16, 10), (0x15, 10), (0x14, 10), (0x13, 10), (0x12, 10), (0x23, 11),
