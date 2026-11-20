@@ -1,0 +1,53 @@
+#version 450
+#include "common.glsl"
+// Per-head QK-RMSNorm, gains and RoPE (model.rs FwdCtx::rows), one workgroup per (row, head).
+// push: 0 r0, 1 ns, 2 d, 3 nh, 4 hd, 5 qkv, 6 gq, 7 gk, 8 qh, 9 qri, 10 kh, 11 kri, 12 qr, 13 kr, 14 cs
+layout(local_size_x = 64) in;
+shared float s_qr, s_kr;
+shared float tq[1024], tk[1024];
+void main() {
+    uint nh = P(3), hd = P(4), d = P(2);
+    uint r = P(0) + gl_WorkGroupID.x / nh, hh = gl_WorkGroupID.x % nh;
+    uint t = r / P(1);
+    uint q = P(5) + r * 3u * d + hh * hd;
+    uint k = q + d;
+    uint o = r * d + hh * hd;
+    uint lid = gl_LocalInvocationID.x;
+    if (lid == 0u) {
+        float ri = rms_inv(q, hd);
+        s_qr = ri;
+        F[P(9) + r * nh + hh] = ri;
+    } else if (lid == 1u) {
+        float ri = rms_inv(k, hd);
+        s_kr = ri;
+        F[P(11) + r * nh + hh] = ri;
+    }
+    barrier();
+    for (uint j = lid; j < hd; j += 64u) {
+        PRECISE float x = F[q + j] * s_qr;
+        F[P(8) + o + j] = x;
+        PRECISE float gx = F[P(6) + j] * x;
+        tq[j] = gx;
+        PRECISE float y = F[k + j] * s_kr;
+        F[P(10) + o + j] = y;
+        PRECISE float gy = F[P(7) + j] * y;
+        tk[j] = gy;
+    }
+    barrier();
+    uint half_ = hd / 2u;
+    uint cs = P(14) + t * hd;
+    for (uint i = lid; i < half_; i += 64u) {
+        float c = F[cs + i], s = F[cs + half_ + i];
+        float a = tq[i], b = tq[i + half_];
+        PRECISE float y0 = a * c - b * s;
+        PRECISE float y1 = a * s + b * c;
+        F[P(12) + o + i] = y0;
+        F[P(12) + o + i + half_] = y1;
+        a = tk[i];
+        b = tk[i + half_];
+        PRECISE float z0 = a * c - b * s;
+        PRECISE float z1 = a * s + b * c;
+        F[P(13) + o + i] = z0;
+        F[P(13) + o + i + half_] = z1;
+    }
+}

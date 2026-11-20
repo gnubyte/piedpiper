@@ -29,7 +29,7 @@ pub fn attach_console() {
 pub fn com_server(action: Action, settings: &Settings) -> ExitCode {
     let _com = ui::Com::init();
     match com::receive_selection(action) {
-        Some(paths) if !paths.is_empty() => run_job(Job::new(action, paths, settings.level), settings),
+        Some(paths) if !paths.is_empty() => run_job(Job::new(action, paths, settings.level).with_gpu(settings.gpu), settings),
         _ => ExitCode::SUCCESS,
     }
 }

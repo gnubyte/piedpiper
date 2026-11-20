@@ -1,0 +1,7 @@
+#version 450
+// No `precise` and no float-control execution modes: the driver's default float behaviour.
+// Only used to measure the effect; never part of the bit-exact model.
+#define FAST_MATH
+#define NO_FLOAT_CONTROLS
+#include "common.glsl"
+#include "matmul_body.glsl"

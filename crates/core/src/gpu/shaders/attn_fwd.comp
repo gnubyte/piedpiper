@@ -1,0 +1,85 @@
+#version 450
+#include "common.glsl"
+// model.rs attn_forward, one workgroup per (row, head).
+// * scores: dot8(q, k) * scale per key, kept in shared memory;
+// * max: computed in parallel. Order cannot matter here: `s > m` never lets a NaN win, and the
+//   only order effect (which of +0 / -0 is kept when the max is zero) cancels in s - m;
+// * exp, then the sum in ascending key order exactly as the CPU does it;
+// * the value sum per output element is ascending in w; values are staged 64 keys at a time
+//   (so the dependent add chain reads shared memory, not global memory).
+// Requires hd <= 64 and win <= 512 (small shared arrays keep many workgroups resident).
+// push: 0 r0, 1 ns, 2 d, 3 nh, 4 hd, 5 win, 6 seg_start, 7 scale, 8 qr, 9 kr, 10 qkv,
+//       11 hist_k (this layer), 12 hist_v (this layer), 13 att, 14 out
+layout(local_size_x = 64) in;
+shared float s_att[512];
+shared float s_red[64];
+shared float s_v[2048];
+shared float s_val;
+void main() {
+    uint ns = P(1), d = P(2), nh = P(3), hd = P(4), win = P(5), seg_start = P(6);
+    float scale = PF(7);
+    uint r = P(0) + gl_WorkGroupID.x / nh, hh = gl_WorkGroupID.x % nh;
+    uint t = r / ns, b = r % ns;
+    uint nk, n_cur, first_slot;
+    attn_window(t, seg_start, win, nk, n_cur, first_slot);
+    uint off = hh * hd;
+    uint q = P(8) + r * d + off;
+    uint att = P(13) + (r * nh + hh) * win;
+    uint hb = b * win * d;
+    uint lid = gl_LocalInvocationID.x;
+    float lmax = uintBitsToFloat(0xFF800000u); // -inf
+    for (uint w = lid; w < nk; w += 64u) {
+        uint k = (w < n_cur) ? P(9) + ((t - w) * ns + b) * d + off
+                             : P(11) + hb + hist_slot(first_slot, w - n_cur, win) * d + off;
+        PRECISE float s = dot8(q, k, hd) * scale;
+        s_att[w] = s;
+        if (s > lmax) lmax = s;
+    }
+    s_red[lid] = lmax;
+    barrier();
+    if (lid == 0u) {
+        float m = uintBitsToFloat(0xFF800000u);
+        for (uint i = 0u; i < 64u; i++) {
+            if (s_red[i] > m) m = s_red[i];
+        }
+        s_val = m;
+    }
+    barrier();
+    float m = s_val;
+    for (uint w = lid; w < nk; w += 64u) {
+        PRECISE float z = s_att[w] - m;
+        if (z < C_EXP_FLOOR) z = C_EXP_FLOOR;
+        s_att[w] = pp_exp(z);
+    }
+    barrier();
+    if (lid == 0u) {
+        PRECISE float s = 0.0;
+        for (uint w = 0u; w < nk; w++) s = s + s_att[w];
+        s_val = f32_div(1.0, s);
+    }
+    barrier();
+    float inv = s_val;
+    for (uint w = lid; w < nk; w += 64u) {
+        PRECISE float a = s_att[w] * inv;
+        s_att[w] = a;
+        F[att + w] = a;
+    }
+    barrier();
+    PRECISE float acc = 0.0;
+    uint kch = 2048u / hd; // keys per staged tile
+    for (uint w0 = 0u; w0 < nk; w0 += kch) {
+        uint cnt = min(kch, nk - w0);
+        for (uint e = lid; e < cnt * hd; e += 64u) {
+            uint ww = e / hd, jj = e % hd, w = w0 + ww;
+            uint v = (w < n_cur) ? P(10) + ((t - w) * ns + b) * 3u * d + 2u * d + off
+                                 : P(12) + hb + hist_slot(first_slot, w - n_cur, win) * d + off;
+            s_v[ww * hd + jj] = F[v + jj];
+        }
+        barrier();
+        if (lid < hd) {
+            for (uint ww = 0u; ww < cnt; ww++) acc = acc + s_att[w0 + ww] * s_v[ww * hd + lid];
+        }
+        barrier();
+    }
+    if (lid < hd) F[P(14) + r * d + off + lid] = acc;
+}

@@ -4,9 +4,10 @@
 //! * macOS: `~/Library/Application Support/PiedPiper/archiver.ini`
 //! * elsewhere: `$XDG_CONFIG_HOME/piedpiper/archiver.ini` (or `~/.config/...`)
 //!
-//! Keys: `level` (1-9, compression level for new archives), `log` (write a debug log next to
-//! the settings file) and `ui = none` (no windows at all; used by automated tests of the
-//! Explorer and Finder integration, where nobody could click a dialog away).
+//! Keys: `level` (1-9, compression level for new archives), `gpu` (run the neural model on the
+//! graphics card where that is faster: AMD Radeon and other Vulkan GPUs), `log` (write a debug
+//! log next to the settings file) and `ui = none` (no windows at all; used by automated tests of
+//! the Explorer and Finder integration, where nobody could click a dialog away).
 
 use std::fs;
 use std::io;
@@ -16,6 +17,9 @@ use std::path::PathBuf;
 pub struct Settings {
     /// Compression level for new archives (1 = fastest ... 9 = strongest).
     pub level: u32,
+    /// Use the graphics card (Vulkan; AMD Radeon tested) for large files. Never changes the
+    /// archives, which extract the same on any computer.
+    pub gpu: bool,
     /// Append diagnostics to `archiver.log` in the settings folder.
     pub log: bool,
     /// Never show a window; report problems only in the log.
@@ -26,6 +30,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             level: piedpiper::DEFAULT_LEVEL,
+            gpu: false,
             log: false,
             headless: false,
         }
@@ -87,6 +92,7 @@ impl Settings {
                         }
                     }
                 }
+                "gpu" => s.gpu = parse_bool(value).unwrap_or(s.gpu),
                 "log" => s.log = parse_bool(value).unwrap_or(s.log),
                 "ui" => s.headless = value.eq_ignore_ascii_case("none"),
                 _ => {}
@@ -100,6 +106,10 @@ impl Settings {
         t += &format!(
             "# Compression level for new archives: 1 (fastest) to 9 (strongest).\nlevel = {}\n",
             self.level
+        );
+        t += &format!(
+            "# Use the graphics card (AMD Radeon or another Vulkan GPU) for large files: on or off.\ngpu = {}\n",
+            if self.gpu { "on" } else { "off" }
         );
         if self.log {
             t += "log = 1\n";
@@ -117,6 +127,29 @@ impl Settings {
             fs::create_dir_all(dir)?;
         }
         fs::write(path, self.to_text())
+    }
+}
+
+/// What the settings windows say about GPU acceleration.
+pub const GPU_ABOUT: &str = "PiedPiper can run its neural network on the graphics card instead of the processor. \
+It works with AMD Radeon graphics (tested on a Radeon RX 6800 XT) and other GPUs whose Vulkan driver keeps \
+exact arithmetic. The graphics card computes exactly the same numbers as the processor, so the archives are \
+identical either way and extract on any computer, with or without a GPU.\n\n\
+With the option on, PiedPiper uses the graphics card where it is faster: compressing files of a few hundred KB \
+and more (about 2x to 3x faster on such files, and many times faster on large ones and at the higher levels), \
+and extracting large archives. Small files stay on the processor.";
+
+/// The checkbox under the levels.
+pub const GPU_OPTION: &str = "Use the graphics card (AMD Radeon or another Vulkan GPU) to compress large files faster";
+
+/// One line on whether this computer has a usable GPU, for the settings window.
+pub fn gpu_line() -> String {
+    if !piedpiper::GPU_SUPPORT {
+        return "GPU acceleration is available in the Windows app and the piedpiper command-line tool.".into();
+    }
+    match piedpiper::gpu_status() {
+        piedpiper::GpuStatus::Available { device, .. } => format!("This computer: {device} is ready."),
+        piedpiper::GpuStatus::Unavailable(why) => format!("This computer: no usable GPU ({why})."),
     }
 }
 
@@ -142,15 +175,18 @@ mod tests {
 
     #[test]
     fn parse_and_print() {
-        let s = Settings::parse("# c\nlevel = 3\nlog=yes\nui = none\nbogus = 1\n");
+        let s = Settings::parse("# c\nlevel = 3\ngpu = on\nlog=yes\nui = none\nbogus = 1\n");
         assert_eq!(
             s,
             Settings {
                 level: 3,
+                gpu: true,
                 log: true,
                 headless: true
             }
         );
+        assert!(!Settings::parse("gpu = off").gpu);
+        assert!(!Settings::parse("").gpu);
         assert_eq!(Settings::parse(&s.to_text()), s);
         assert_eq!(Settings::parse("level = 42").level, piedpiper::DEFAULT_LEVEL);
         assert_eq!(Settings::parse("").level, piedpiper::DEFAULT_LEVEL);

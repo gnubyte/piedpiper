@@ -1,0 +1,19 @@
+#version 450
+#include "common.glsl"
+// kernels.rs swiglu_bwd_v: out = [ds*u*(s*(1 + g*(1-s))) | ds*(g*s)].
+// push: 0 nrows, 1 dff, 2 gu, 3 ds, 4 out
+layout(local_size_x = 64) in;
+void main() {
+    uint e = linear_id(), dff = P(1);
+    if (e >= P(0) * dff) return;
+    uint r = e / dff, i = e % dff;
+    float g = F[P(2) + r * 2u * dff + i];
+    float u = F[P(2) + r * 2u * dff + dff + i];
+    float d = F[P(3) + r * dff + i];
+    float s = pp_sigmoid(g);
+    PRECISE float silu = g * s;
+    PRECISE float o1 = (d * u) * (s * (1.0 + g * (1.0 - s)));
+    PRECISE float o2 = d * silu;
+    F[P(4) + r * 2u * dff + i] = o1;
+    F[P(4) + r * 2u * dff + dff + i] = o2;
+}

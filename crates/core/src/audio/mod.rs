@@ -856,7 +856,7 @@ mod tests {
         let c = compress(&data, &opts).unwrap();
         assert_eq!(c[5], MODE_AUDIO);
         assert_ne!(c, compress(&data, &CompressOptions { allow_stored: false, ..CompressOptions::level(2) }).unwrap());
-        let back = decompress_with_progress(&c, &DecompressOptions { threads: 0, prior: Some(prior) }, &mut |_, _| true).unwrap();
+        let back = decompress_with_progress(&c, &DecompressOptions { threads: 0, prior: Some(prior), ..Default::default() }, &mut |_, _| true).unwrap();
         assert_eq!(back, data);
     }
 
@@ -866,7 +866,7 @@ mod tests {
         let a = compress(&data, &CompressOptions { threads: 1, ..small_model() }).unwrap();
         let b = compress(&data, &CompressOptions { threads: 4, ..small_model() }).unwrap();
         assert_eq!(a, b);
-        let back = decompress_with_progress(&a, &DecompressOptions { threads: 3, prior: None }, &mut |_, _| true).unwrap();
+        let back = decompress_with_progress(&a, &DecompressOptions { threads: 3, prior: None, ..Default::default() }, &mut |_, _| true).unwrap();
         assert_eq!(back, data);
     }
 

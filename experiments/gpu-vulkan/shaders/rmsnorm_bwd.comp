@@ -1,0 +1,49 @@
+#version 450
+#include "common.glsl"
+// The dx half of model.rs rmsnorm_bwd, one workgroup per row:
+// gdy = g * dy; m = dot(gdy, xh) / n; dx = rinv * (gdy - xh * m)  (written, or added).
+// For the gain gradient (dg += dy * xh, ascending rows) it stores the rounded products
+// dy * xh, which gainsum.comp adds up in order.
+// push: 0 d, 1 dy, 2 xh, 3 rinv, 4 g, 5 dx, 6 add, 7 prod
+layout(local_size_x = 64) in;
+shared float gdy[2048];
+shared float s_m;
+void main() {
+    uint d = P(0), r = gl_WorkGroupID.x;
+    uint dy = P(1) + r * d, xh = P(2) + r * d, dx = P(5) + r * d;
+    uint lid = gl_LocalInvocationID.x;
+    for (uint i = lid; i < d; i += 64u) {
+        PRECISE float v = F[P(4) + i] * F[dy + i];
+        gdy[i] = v;
+        PRECISE float pr = F[dy + i] * F[xh + i];
+        F[P(7) + r * d + i] = pr;
+    }
+    barrier();
+    if (lid == 0u) {
+        uint chunks = d / 8u;
+        PRECISE float l0 = 0.0, l1 = 0.0, l2 = 0.0, l3 = 0.0, l4 = 0.0, l5 = 0.0, l6 = 0.0, l7 = 0.0;
+        for (uint c = 0u; c < chunks; c++) {
+            uint o = c * 8u;
+            l0 = l0 + gdy[o] * F[xh + o];
+            l1 = l1 + gdy[o + 1u] * F[xh + o + 1u];
+            l2 = l2 + gdy[o + 2u] * F[xh + o + 2u];
+            l3 = l3 + gdy[o + 3u] * F[xh + o + 3u];
+            l4 = l4 + gdy[o + 4u] * F[xh + o + 4u];
+            l5 = l5 + gdy[o + 5u] * F[xh + o + 5u];
+            l6 = l6 + gdy[o + 6u] * F[xh + o + 6u];
+            l7 = l7 + gdy[o + 7u] * F[xh + o + 7u];
+        }
+        PRECISE float s = ((l0 + l4) + (l1 + l5)) + ((l2 + l6) + (l3 + l7));
+        for (uint i = chunks * 8u; i < d; i++) s = s + gdy[i] * F[xh + i];
+        s_m = f32_div(s, float(d));
+    }
+    barrier();
+    float m = s_m;
+    float rinv = F[P(3) + r];
+    bool add = P(6) != 0u;
+    for (uint i = lid; i < d; i += 64u) {
+        PRECISE float v = rinv * (gdy[i] - F[xh + i] * m);
+        if (add) v = F[dx + i] + v;
+        F[dx + i] = v;
+    }
+}

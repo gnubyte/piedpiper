@@ -60,11 +60,19 @@ pub struct Job {
     pub paths: Vec<PathBuf>,
     /// Compression level (ignored when extracting).
     pub level: u32,
+    /// Let the codec use the graphics card where it is faster (output is unchanged).
+    pub gpu: bool,
 }
 
 impl Job {
     pub fn new(action: Action, paths: Vec<PathBuf>, level: u32) -> Job {
-        Job { action, paths, level }
+        Job { action, paths, level, gpu: false }
+    }
+
+    /// The same job, with GPU acceleration on or off.
+    pub fn with_gpu(mut self, gpu: bool) -> Job {
+        self.gpu = gpu;
+        self
     }
 
     /// First line of the progress window: `Compressing “report.docx”`, `Extracting 3 archives`.
@@ -82,10 +90,11 @@ impl Job {
     /// Runs the job to completion on the calling thread.
     pub fn run(&self, st: &Status) -> Result<Outcome, Error> {
         crate::log::log(format!(
-            "{} {} item(s), level {}",
+            "{} {} item(s), level {}{}",
             self.action.arg(),
             self.paths.len(),
-            self.level
+            self.level,
+            if self.gpu { ", GPU allowed" } else { "" }
         ));
         let r = match self.action {
             Action::Compress => archive::compress(
@@ -93,12 +102,13 @@ impl Job {
                     inputs: self.paths.clone(),
                     level: self.level,
                     dest_dir: None,
+                    gpu: self.gpu,
                 },
                 st,
             ),
-            Action::Extract => archive::extract(&self.paths, ExtractMode::Smart, st),
-            Action::ExtractHere => archive::extract(&self.paths, ExtractMode::Here, st),
-            Action::ExtractToFolder => archive::extract(&self.paths, ExtractMode::ToFolder, st),
+            Action::Extract => archive::extract_with(&self.paths, ExtractMode::Smart, self.gpu, st),
+            Action::ExtractHere => archive::extract_with(&self.paths, ExtractMode::Here, self.gpu, st),
+            Action::ExtractToFolder => archive::extract_with(&self.paths, ExtractMode::ToFolder, self.gpu, st),
         };
         match &r {
             Ok(o) => crate::log::log(format!(

@@ -27,6 +27,8 @@ mod filter;
 mod format;
 mod fpenv;
 mod fpmath;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod image;
 mod jpeg;
 mod kernels;
@@ -41,8 +43,8 @@ mod simd;
 mod tokenizer;
 
 pub use codec::{
-    compress, compress_with_progress, decompress, decompress_with_progress, inspect, train_prior, CompressOptions,
-    DecompressOptions, Info, ProgressFn, TokenizerChoice, TrainOptions, TrainReport,
+    compress, compress_with_progress, decompress, decompress_with_progress, gpu_status, gpu_stream_count, inspect, train_prior, CompressOptions,
+    DecompressOptions, GpuMode, GpuStatus, Info, GPU_SUPPORT, ProgressFn, TokenizerChoice, TrainOptions, TrainReport,
 };
 pub use config::{batch_policy, preset, ModelConfig, Preset, TrainConfig, DEFAULT_LEVEL, MAX_LEVEL, MIN_LEVEL};
 pub use prior::{builtin_prior, builtin_prior_by_id, builtin_priors, BuiltinPrior, Prior, PRIOR_MAGIC};

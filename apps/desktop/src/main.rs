@@ -30,6 +30,8 @@ USAGE:
 
 OPTIONS:
     -l, --level N    compression level 1-9 for this run (default: the saved setting)
+        --gpu        use the graphics card (AMD Radeon or another Vulkan GPU) where it is
+                     faster, for this run (default: the saved setting)
         --cli        show progress in the terminal instead of a window
     -h, --help       this help
     -V, --version    version
@@ -72,6 +74,7 @@ fn parse(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<Ar
     let mut paths = Vec::new();
     let (mut level, mut cli, mut machine, mut quiet, mut com, mut only_paths) =
         (None, false, false, false, None, false);
+    let mut gpu = settings.gpu;
     let mut it = args.peekable();
     while let Some(arg) = it.next() {
         let s = arg.to_string_lossy().into_owned();
@@ -94,6 +97,7 @@ fn parse(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<Ar
                 })
             }
             "--cli" => cli = true,
+            "--gpu" => gpu = true,
             "--machine" => machine = true,
             "-q" | "--quiet" => quiet = true,
             "-l" | "--level" => {
@@ -134,7 +138,7 @@ fn parse(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<Ar
                 if paths.is_empty() {
                     return Err(format!("{v} needs at least one path"));
                 }
-                Command::Job(Job::new(action, paths, level))
+                Command::Job(Job::new(action, paths, level).with_gpu(gpu))
             }
             None if paths.is_empty() => Command::Settings,
             // Files dropped on the program: extract archives, compress anything else.
@@ -145,7 +149,7 @@ fn parse(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<Ar
                 } else {
                     Action::Compress
                 };
-                Command::Job(Job::new(action, paths, level))
+                Command::Job(Job::new(action, paths, level).with_gpu(gpu))
             }
         }
     };

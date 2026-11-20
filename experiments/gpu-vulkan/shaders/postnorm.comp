@@ -1,0 +1,24 @@
+#version 450
+#include "common.glsl"
+// The Peri-LN output norm plus residual add of model.rs FwdCtx::rows, one workgroup per row:
+// rinv = rms_inv(sd); xh = sd * rinv; h += g * xh.
+// push: 0 r0, 1 d, 2 sd, 3 g, 4 xh, 5 h, 6 rinv
+layout(local_size_x = 64) in;
+shared float s_r;
+void main() {
+    uint r = P(0) + gl_WorkGroupID.x, d = P(1);
+    uint x = P(2) + r * d;
+    if (gl_LocalInvocationID.x == 0u) {
+        float ri = rms_inv(x, d);
+        s_r = ri;
+        F[P(6) + r] = ri;
+    }
+    barrier();
+    float ri = s_r;
+    for (uint i = gl_LocalInvocationID.x; i < d; i += 64u) {
+        PRECISE float v = F[x + i] * ri;
+        F[P(4) + r * d + i] = v;
+        PRECISE float hv = F[P(5) + r * d + i] + F[P(3) + i] * v;
+        F[P(5) + r * d + i] = hv;
+    }
+}

@@ -147,7 +147,7 @@ mod tests {
         let a = compress(JPEG, &CompressOptions { threads: 1, ..Default::default() }).unwrap();
         let b = compress(JPEG, &CompressOptions { threads: 4, ..Default::default() }).unwrap();
         assert_eq!(a, b);
-        let back = decompress_with_progress(&a, &DecompressOptions { threads: 3, prior: None }, &mut |_, _| true).unwrap();
+        let back = decompress_with_progress(&a, &DecompressOptions { threads: 3, prior: None, ..Default::default() }, &mut |_, _| true).unwrap();
         assert_eq!(back, JPEG);
     }
 

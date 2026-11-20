@@ -1,0 +1,70 @@
+#version 450
+#include "common.glsl"
+// The query half of model.rs attn_backward, one workgroup per (row, head). Rows are
+// independent here (only dk / dv accumulate across positions; that is attn_bwd_kv.comp):
+//   datt[w] = dot8(dout, v_w);  sad = Σ_w att[w]*datt[w] (ascending);
+//   ds[w] = att[w]*(datt[w] - sad)*scale (kept for attn_bwd_kv);  dq = Σ_w ds[w]*k_w (ascending).
+// Requires hd <= 64 and win <= 512 (small shared arrays keep many workgroups resident).
+// push: 0 ns, 1 d, 2 nh, 3 hd, 4 win, 5 seg_start, 6 scale, 7 kr, 8 qkv, 9 hist_k (layer),
+//       10 hist_v (layer), 11 att, 12 dout, 13 dq, 14 ds, 15 active (U)
+layout(local_size_x = 64) in;
+shared float s_datt[512];
+shared float s_ds[512];
+shared float s_k[2048];
+shared float s_val;
+void main() {
+    uint ns = P(0), d = P(1), nh = P(2), hd = P(3), win = P(4), seg_start = P(5);
+    float scale = PF(6);
+    uint r = gl_WorkGroupID.x / nh, hh = gl_WorkGroupID.x % nh;
+    uint t = r / ns, b = r % ns;
+    uint off = hh * hd, hb = b * win * d;
+    uint lid = gl_LocalInvocationID.x;
+    if (U[P(15) + r] == 0u) {
+        if (lid < hd) F[P(13) + r * d + off + lid] = 0.0;
+        return;
+    }
+    uint nk, n_cur, first_slot;
+    attn_window(t, seg_start, win, nk, n_cur, first_slot);
+    uint doh = P(12) + r * d + off;
+    uint att = P(11) + (r * nh + hh) * win;
+    uint dsr = P(14) + (r * nh + hh) * win;
+    for (uint w = lid; w < nk; w += 64u) {
+        uint v = (w < n_cur) ? P(8) + ((t - w) * ns + b) * 3u * d + 2u * d + off
+                             : P(10) + hb + hist_slot(first_slot, w - n_cur, win) * d + off;
+        float dt = dot8(doh, v, hd);
+        s_datt[w] = dt;
+        PRECISE float pr = F[att + w] * dt;
+        s_ds[w] = pr; // the products of the sad sum, added in order below
+    }
+    barrier();
+    if (lid == 0u) {
+        PRECISE float sad = 0.0;
+        for (uint w = 0u; w < nk; w++) sad = sad + s_ds[w];
+        s_val = sad;
+    }
+    barrier();
+    float sad = s_val;
+    for (uint w = lid; w < nk; w += 64u) {
+        PRECISE float ds = (F[att + w] * (s_datt[w] - sad)) * scale;
+        s_ds[w] = ds;
+        F[dsr + w] = ds;
+    }
+    barrier();
+    PRECISE float acc = 0.0;
+    uint kch = 2048u / hd; // keys per staged tile
+    for (uint w0 = 0u; w0 < nk; w0 += kch) {
+        uint cnt = min(kch, nk - w0);
+        for (uint e = lid; e < cnt * hd; e += 64u) {
+            uint ww = e / hd, jj = e % hd, w = w0 + ww;
+            uint k = (w < n_cur) ? P(7) + ((t - w) * ns + b) * d + off
+                                 : P(9) + hb + hist_slot(first_slot, w - n_cur, win) * d + off;
+            s_k[ww * hd + jj] = F[k + jj];
+        }
+        barrier();
+        if (lid < hd) {
+            for (uint ww = 0u; ww < cnt; ww++) acc = acc + s_ds[w0 + ww] * s_k[ww * hd + lid];
+        }
+        barrier();
+    }
+    if (lid < hd) F[P(13) + r * d + off + lid] = acc;
+}

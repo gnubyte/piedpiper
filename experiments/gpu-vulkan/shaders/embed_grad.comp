@@ -1,0 +1,18 @@
+#version 450
+#include "common.glsl"
+// Embedding gradient (end of model.rs compute_grads): g[tok][i] += dh[r][i] over active rows in
+// ascending order. The host groups the segment's active rows by input token (each group in
+// ascending row order), so one thread per (token, column) replays that token's adds in the
+// CPU's order while different tokens run in parallel.
+// push: 0 ntok, 1 d, 2 bh, 3 emb_grad, 4 groups (U: tok, start, count per token), 5 rows (U)
+layout(local_size_x = 64) in;
+void main() {
+    uint e = linear_id(), d = P(1);
+    if (e >= P(0) * d) return;
+    uint u = e / d, i = e % d;
+    uint tok = U[P(4) + 3u * u], st = U[P(4) + 3u * u + 1u], cnt = U[P(4) + 3u * u + 2u];
+    uint idx = P(3) + tok * d + i;
+    PRECISE float acc = F[idx];
+    for (uint k = 0u; k < cnt; k++) acc = acc + F[P(2) + U[P(5) + st + k] * d + i];
+    F[idx] = acc;
+}

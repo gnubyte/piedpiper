@@ -1,6 +1,6 @@
 //! `piedpiper` — command-line front end (gzip/xz-style).
 
-use piedpiper::{CompressOptions, DecompressOptions, ModelConfig, Prior, TokenizerChoice, TrainOptions};
+use piedpiper::{CompressOptions, DecompressOptions, GpuMode, GpuStatus, ModelConfig, Prior, TokenizerChoice, TrainOptions};
 use std::sync::Arc;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -21,6 +21,8 @@ USAGE:
     piedpiper bench [OPTIONS] FILE...      compress + decompress + verify, report speed
     piedpiper train -o PRIOR [OPTIONS] FILE...
                                            train a prior (initial weights) on a corpus
+    piedpiper gpu                          check for a GPU (AMD Radeon, Vulkan) that can
+                                           run the neural model
 
     With no FILE, or FILE '-', reads stdin and writes stdout.
 
@@ -33,6 +35,10 @@ OPTIONS:
     -f, --force            overwrite existing output files
         --rm               delete input files after success (default: keep them)
     -t, --threads N        worker threads (default: all cores; never changes output)
+        --gpu              run the neural model on the GPU (same as --gpu-mode on)
+        --gpu-mode MODE    off | auto | on (default off). auto uses the GPU only where it
+                           is faster: compressing 64K+ tokens, decompressing large inputs.
+                           Never changes the output
     -T, --tokenizer KIND   auto | bytes | bpe | bpe:VOCAB   (default auto)
         --verify           after compressing, decompress in memory and compare
     -p, --prior FILE       start from (and decompress with) a pretrained prior
@@ -51,6 +57,16 @@ OPTIONS:
     -v, --verbose          print model details
     -h, --help             this help
     -V, --version          version
+
+GPU ACCELERATION:
+    The neural model can run on a GPU through Vulkan: AMD Radeon graphics cards (tested on
+    an RX 6800 XT with AMD's Windows driver) and other GPUs whose Vulkan 1.2 driver keeps
+    exact IEEE arithmetic. The GPU computes the same bits as the CPU, so the output is
+    byte-identical and every file decompresses on any machine, with or without a GPU.
+    Compressing gains the most: 2x-3x on files of a few hundred KB to a few MB, and on
+    large inputs the network ran 6x (level 2) to 21x (level 9) faster than on 16 CPU
+    threads in tests. Decompressing is faster only for large inputs. `piedpiper gpu`
+    checks this machine.
 
 ADVANCED (override the level's network / training recipe):
     --d-model N --layers N --heads N --d-ff N --window N --seg N --streams N
@@ -81,6 +97,7 @@ struct Args {
     no_filter: bool,
     no_audio: bool,
     epochs: u32,
+    gpu: GpuMode,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -91,6 +108,7 @@ enum Mode {
     Info,
     Bench,
     Train,
+    Gpu,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -119,6 +137,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                     a.mode = Mode::Train;
                     continue;
                 }
+                "gpu" => {
+                    a.mode = Mode::Gpu;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -135,6 +157,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "-V" | "--version" => {
                 println!("piedpiper {} (format v{})", piedpiper::VERSION, piedpiper::FORMAT_VERSION);
+                if piedpiper::GPU_SUPPORT {
+                    println!("GPU acceleration: built in (Vulkan; AMD Radeon tested). Run `piedpiper gpu` to check this machine.");
+                }
                 return Ok(None);
             }
             "-d" | "--decompress" => a.mode = Mode::Decompress,
@@ -157,6 +182,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-filter" => a.no_filter = true,
             "--no-audio" => a.no_audio = true,
             "--epochs" => a.epochs = val("--epochs")?.parse().map_err(|_| "bad --epochs")?,
+            "--gpu" => a.gpu = GpuMode::On,
+            "--no-gpu" => a.gpu = GpuMode::Off,
+            "--gpu-mode" => a.gpu = parse_gpu_mode(&val("--gpu-mode")?)?,
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
             s if s.len() == 2 && s.as_bytes()[1].is_ascii_digit() && s != "-0" => {
@@ -182,6 +210,53 @@ fn parse_args() -> Result<Option<Args>, String> {
         }
     }
     Ok(Some(a))
+}
+
+fn parse_gpu_mode(s: &str) -> Result<GpuMode, String> {
+    match s {
+        "off" | "cpu" | "no" => Ok(GpuMode::Off),
+        "auto" => Ok(GpuMode::Auto),
+        "on" | "gpu" | "yes" => Ok(GpuMode::On),
+        _ => Err(format!("unknown GPU mode {s} (off, auto, on)")),
+    }
+}
+
+/// With --gpu, a file that did not run on the GPU gets a note on why (the output is the same).
+fn gpu_fallback_note(a: &Args, on_gpu: bool) {
+    if a.gpu == GpuMode::On && !on_gpu {
+        if let GpuStatus::Unavailable(why) = piedpiper::gpu_status() {
+            eprintln!("    (ran on the CPU: {why}; the output is the same)");
+        }
+    }
+}
+
+/// `piedpiper gpu`: is there a GPU that can run the model here?
+fn gpu_check() -> ExitCode {
+    if !piedpiper::GPU_SUPPORT {
+        println!("GPU acceleration: not in this build (it was compiled without the `gpu` feature).");
+        return ExitCode::FAILURE;
+    }
+    match piedpiper::gpu_status() {
+        GpuStatus::Available { device, driver } => {
+            println!("GPU acceleration: available");
+            println!("    device   {device}");
+            println!("    driver   {driver}");
+            println!("    check    the GPU reproduced the CPU model bit for bit");
+            println!();
+            println!("Use it with `piedpiper --gpu FILE`, or `--gpu-mode auto` to use it only where it is faster.");
+            println!("The output is identical either way, so the files decompress on any machine.");
+            ExitCode::SUCCESS
+        }
+        GpuStatus::Unavailable(why) => {
+            println!("GPU acceleration: not available here: {why}");
+            println!();
+            println!("PiedPiper runs its model on AMD Radeon and other GPUs with a Vulkan 1.2 driver that keeps");
+            println!("exact IEEE arithmetic (denormals, round-to-nearest-even). Install or update the graphics");
+            println!("driver (on Windows, AMD Software: Adrenalin Edition includes Vulkan). Everything works on");
+            println!("the CPU meanwhile, with the same output.");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn parse_tokenizer(s: &str) -> Result<TokenizerChoice, String> {
@@ -211,7 +286,7 @@ fn load_prior(a: &Args) -> Result<Option<Arc<Prior>>, String> {
 }
 
 fn dopts(a: &Args, prior: &Option<Arc<Prior>>) -> DecompressOptions {
-    DecompressOptions { threads: a.threads, prior: prior.clone() }
+    DecompressOptions { threads: a.threads, prior: prior.clone(), gpu: a.gpu }
 }
 
 fn build_options(a: &Args) -> Result<CompressOptions, String> {
@@ -225,6 +300,7 @@ fn build_options(a: &Args) -> Result<CompressOptions, String> {
     o.jpeg = !a.no_jpeg;
     o.media = !a.no_video;
     o.audio = !a.no_audio;
+    o.gpu = a.gpu;
     if a.no_filter {
         o.filter = piedpiper::FilterChoice::Off;
     }
@@ -438,12 +514,14 @@ fn compress_one(a: &Args, opts: &CompressOptions, input: &str) -> Result<(), Str
     let show = !a.quiet && io::stderr().is_terminal();
     let mut prog = Progress::new(show, &short(input));
     let t0 = Instant::now();
+    let gpu_before = piedpiper::gpu_stream_count();
     let packed = piedpiper::compress_with_progress(&data, opts, &mut |d, t| {
         prog.update(d, t);
         true
     })
     .map_err(|e| format!("{input}: {e}"))?;
     let secs = t0.elapsed().as_secs_f64();
+    let on_gpu = piedpiper::gpu_stream_count() > gpu_before;
     prog.finish();
     if a.verify {
         let back = piedpiper::decompress_with_progress(&packed, &dopts(a, &opts.prior), &mut |_, _| true)
@@ -457,14 +535,16 @@ fn compress_one(a: &Args, opts: &CompressOptions, input: &str) -> Result<(), Str
         let ratio = if packed.is_empty() { 0.0 } else { data.len() as f64 / packed.len() as f64 };
         let bpb = if data.is_empty() { 0.0 } else { packed.len() as f64 * 8.0 / data.len() as f64 };
         eprintln!(
-            "{}: {} -> {} ({ratio:.3}x, {bpb:.3} bits/byte) in {:.1}s ({}/s){}",
+            "{}: {} -> {} ({ratio:.3}x, {bpb:.3} bits/byte) in {:.1}s ({}/s){}{}",
             short(input),
             human(data.len() as u64),
             human(packed.len() as u64),
             secs,
             human((data.len() as f64 / secs.max(1e-9)) as u64),
+            if on_gpu { ", on the GPU" } else { "" },
             if a.verify { ", verified" } else { "" }
         );
+        gpu_fallback_note(a, on_gpu);
         if a.verbose {
             if let Ok(info) = piedpiper::inspect(&packed) {
                 eprintln!("    {}", describe(&info));
@@ -488,23 +568,27 @@ fn decompress_one(a: &Args, prior: &Option<Arc<Prior>>, input: &str) -> Result<(
     let show = !a.quiet && io::stderr().is_terminal();
     let mut prog = Progress::new(show, &short(input));
     let t0 = Instant::now();
+    let gpu_before = piedpiper::gpu_stream_count();
     let plain = piedpiper::decompress_with_progress(&data, &dopts(a, prior), &mut |d, t| {
         prog.update(d, t);
         true
     })
     .map_err(|e| format!("{input}: {e}"))?;
+    let on_gpu = piedpiper::gpu_stream_count() > gpu_before;
     prog.finish();
     write_output(out.as_deref(), &plain, a.force)?;
     if !a.quiet && out.is_some() {
         let secs = t0.elapsed().as_secs_f64();
         eprintln!(
-            "{}: {} -> {} in {:.1}s ({}/s)",
+            "{}: {} -> {} in {:.1}s ({}/s){}",
             short(input),
             human(data.len() as u64),
             human(plain.len() as u64),
             secs,
-            human((plain.len() as f64 / secs.max(1e-9)) as u64)
+            human((plain.len() as f64 / secs.max(1e-9)) as u64),
+            if on_gpu { ", on the GPU" } else { "" }
         );
+        gpu_fallback_note(a, on_gpu);
     }
     if a.rm && input != "-" && out.is_some() {
         fs::remove_file(input).map_err(|e| format!("{input}: {e}"))?;
@@ -644,6 +728,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if a.mode == Mode::Gpu {
+        return gpu_check();
+    }
     if a.files.is_empty() {
         if a.mode == Mode::Info || a.mode == Mode::Bench || a.mode == Mode::Train {
             eprintln!("piedpiper: no input files");
@@ -675,12 +762,20 @@ fn main() -> ExitCode {
             }
         };
     }
+    // With --gpu, say which GPU runs the model (or why none can). `auto` stays quiet: it opens
+    // the GPU only for streams that gain from it, and each file's summary says when it did.
+    if a.gpu == GpuMode::On && !a.quiet && a.mode != Mode::Info {
+        match piedpiper::gpu_status() {
+            GpuStatus::Available { device, .. } => eprintln!("piedpiper: neural model on the GPU: {device}"),
+            GpuStatus::Unavailable(why) => eprintln!("piedpiper: no usable GPU ({why}); using the CPU"),
+        }
+    }
     let mut failed = false;
     for f in a.files.clone() {
         let r = match a.mode {
             Mode::Compress => compress_one(&a, &opts, &f),
             Mode::Decompress => decompress_one(&a, &opts.prior, &f),
-            Mode::Train => unreachable!(),
+            Mode::Train | Mode::Gpu => unreachable!(),
             Mode::Info => info_one(&f),
             Mode::Bench => bench_one(&a, &opts, &f),
         };

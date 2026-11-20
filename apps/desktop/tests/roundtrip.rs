@@ -47,6 +47,7 @@ fn st() -> Status {
 fn compress_paths(paths: &[PathBuf]) -> Result<ppdesktop::Outcome, Error> {
     compress(
         &CompressRequest {
+            gpu: false,
             inputs: paths.to_vec(),
             level: LEVEL,
             dest_dir: None,
@@ -250,6 +251,7 @@ fn cancelled_jobs_leave_nothing() {
     s.cancel();
     let r = compress(
         &CompressRequest {
+            gpu: false,
             inputs: vec![d.join("x.txt")],
             level: LEVEL,
             dest_dir: None,

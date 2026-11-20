@@ -157,7 +157,9 @@ fn show_welcome(mtm: MainThreadMarker) {
          Compress with PiedPiper (under Quick Actions or Services). Double-click a .pp archive to \
          extract it, or Control-click it for Extract Here and Extract to Folder.\n\n\
          If the commands are missing, enable them in System Settings › Keyboard › Keyboard \
-         Shortcuts › Services › Files and Folders.\n\nCompression level for new archives:"
+         Shortcuts › Services › Files and Folders.\n\nOn Windows and Linux, PiedPiper can also run \
+         its network on AMD Radeon and other Vulkan graphics cards, with identical archives.\n\n\
+         Compression level for new archives:"
     ));
     let popup = NSPopUpButton::initWithFrame_pullsDown(
         NSPopUpButton::alloc(mtm),
@@ -248,10 +250,10 @@ define_class!(
                 paths.into_iter().partition(|p| naming::is_archive_name(&naming::display_name(p)));
             let level = settings().level;
             if !archives.is_empty() {
-                start_job(self.mtm(), Job::new(Action::Extract, archives, level));
+                start_job(self.mtm(), Job::new(Action::Extract, archives, level).with_gpu(settings().gpu));
             }
             if !others.is_empty() {
-                start_job(self.mtm(), Job::new(Action::Compress, others, level));
+                start_job(self.mtm(), Job::new(Action::Compress, others, level).with_gpu(settings().gpu));
             }
         }
 
@@ -295,7 +297,7 @@ impl AppDelegate {
     fn service(&self, action: Action, pboard: &NSPasteboard) {
         let paths = pasteboard_paths(pboard);
         log(format!("service {}: {} item(s)", action.arg(), paths.len()));
-        start_job(self.mtm(), Job::new(action, paths, settings().level));
+        start_job(self.mtm(), Job::new(action, paths, settings().level).with_gpu(settings().gpu));
     }
 }
 

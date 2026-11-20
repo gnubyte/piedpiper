@@ -237,6 +237,16 @@ pub struct CompressRequest {
     pub level: u32,
     /// Folder for the new archive; by default the folder of the first selected item.
     pub dest_dir: Option<PathBuf>,
+    /// Let the codec use the graphics card where it is faster (the archive is unchanged).
+    pub gpu: bool,
+}
+
+fn gpu_mode(gpu: bool) -> piedpiper::GpuMode {
+    if gpu {
+        piedpiper::GpuMode::Auto
+    } else {
+        piedpiper::GpuMode::Off
+    }
 }
 
 /// Compresses the selection into one new archive (see the crate docs for the naming rules).
@@ -276,7 +286,8 @@ pub fn compress(req: &CompressRequest, st: &Status) -> Result<Outcome, Error> {
     let span = Span::FULL.sub(0.02, 0.99);
     // The codec sets up its model before it reports progress; say what is happening meanwhile.
     st.update(span.at(0.0), format!("Compressing {}", fmt::size(data.len() as u64)));
-    let opts = CompressOptions::level(req.level.clamp(piedpiper::MIN_LEVEL, piedpiper::MAX_LEVEL));
+    let mut opts = CompressOptions::level(req.level.clamp(piedpiper::MIN_LEVEL, piedpiper::MAX_LEVEL));
+    opts.gpu = gpu_mode(req.gpu);
     let packed = piedpiper::compress_with_progress(&data, &opts, &mut |done, total| {
         let total = total.max(1);
         st.update(
@@ -469,6 +480,11 @@ pub enum ExtractMode {
 /// run and the failures are listed in [`Outcome::errors`]; a single failing archive is an
 /// error. Non-archives in a mixed selection are ignored.
 pub fn extract(paths: &[PathBuf], mode: ExtractMode, st: &Status) -> Result<Outcome, Error> {
+    extract_with(paths, mode, false, st)
+}
+
+/// [`extract`], letting the codec use the graphics card for large archives when `gpu` is set.
+pub fn extract_with(paths: &[PathBuf], mode: ExtractMode, gpu: bool, st: &Status) -> Result<Outcome, Error> {
     let mut archives = absolute_inputs(paths)?;
     let is_pp = |p: &PathBuf| naming::is_archive_name(&naming::display_name(p));
     if archives.iter().any(is_pp) {
@@ -492,7 +508,7 @@ pub fn extract(paths: &[PathBuf], mode: ExtractMode, st: &Status) -> Result<Outc
             len: size as f64 / total as f64,
         };
         start += size;
-        match extract_one(p, mode, st, span) {
+        match extract_one(p, mode, gpu, st, span) {
             Ok(o) => out.merge(o),
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(e) => {
@@ -510,7 +526,7 @@ pub fn extract(paths: &[PathBuf], mode: ExtractMode, st: &Status) -> Result<Outc
     Ok(out)
 }
 
-fn extract_one(path: &Path, mode: ExtractMode, st: &Status, span: Span) -> Result<Outcome, Error> {
+fn extract_one(path: &Path, mode: ExtractMode, gpu: bool, st: &Status, span: Span) -> Result<Outcome, Error> {
     let name = naming::display_name(path);
     let parent = path
         .parent()
@@ -522,7 +538,8 @@ fn extract_one(path: &Path, mode: ExtractMode, st: &Status, span: Span) -> Resul
     }
     let unpack = span.sub(0.0, 0.95);
     st.update(unpack.at(0.0), format!("Decompressing {}", fmt::quoted(&name)));
-    let plain = piedpiper::decompress_with_progress(&packed, &DecompressOptions::default(), &mut |done, total| {
+    let dopts = DecompressOptions { gpu: gpu_mode(gpu), ..Default::default() };
+    let plain = piedpiper::decompress_with_progress(&packed, &dopts, &mut |done, total| {
         let total = total.max(1);
         st.update(
             unpack.at(done as f64 / total as f64),

@@ -10,6 +10,13 @@ PiedPiper re-engineers the method to run on ordinary CPUs and to be **bit-exact
 everywhere**. A file compressed on a Windows laptop decompresses on a Linux server, an
 Android phone, in Python, or in a browser.
 
+**AMD Radeon GPUs can do the work too.** The same network also runs on a graphics card through
+Vulkan: AMD Radeon cards (tested on an RX 6800 XT) and other GPUs whose Vulkan driver keeps
+exact IEEE arithmetic. Turn it on with `piedpiper --gpu` (or `--gpu-mode auto`), or with **Use
+the graphics card** in the Windows app's settings. The graphics card computes exactly the same
+bits as the processor, so the archives are identical and still decompress on any machine.
+Large inputs compress many times faster. See [GPU acceleration](#gpu-acceleration-amd-radeon-and-other-vulkan-gpus).
+
 ## Download
 
 | Your computer | Download |
@@ -37,7 +44,7 @@ once on first launch.
 
 | Windows: Start menu → PiedPiper | Mac: opening the app |
 |:---:|:---:|
-| <img src="docs/images/windows-settings.png" width="380" alt="Windows settings dialog explaining the commands, with the compression level choices"> | <img src="docs/images/macos-settings.png" width="260" alt="Mac window explaining the Finder commands, with the compression level menu"> |
+| <img src="docs/images/windows-settings.png" width="380" alt="Windows settings dialog explaining the commands, with the compression level choices and the Use the graphics card option"> | <img src="docs/images/macos-settings.png" width="260" alt="Mac window explaining the Finder commands, with the compression level menu"> |
 
 The menus are Windows 11's full right-click menu (**Show more options**); Windows 10 shows
 them directly.
@@ -90,11 +97,16 @@ piedpiper -d big.log.pp               # -> big.log
 piedpiper info big.log.pp             # model, tokenizer, sizes
 piedpiper bench -3 file               # compress + decompress + verify, with speeds
 piedpiper train -o code.ppp corpus/*  # train a prior; use it with --prior code.ppp
+piedpiper gpu                         # is there a GPU (AMD Radeon, Vulkan) that can help?
+piedpiper --gpu big.log               # same output, the network runs on the GPU
 ```
 
 **Windows and macOS desktop** (MSI / DMG from the releases): select files or folders in File
 Explorer or the Finder, right-click, **Compress with PiedPiper**; double-click a `.pp` archive to
-extract it. Several items become one `Archive.tar.pp`. See [apps/desktop](apps/desktop).
+extract it. Several items become one `Archive.tar.pp`. On Windows, start **PiedPiper** from the
+Start menu to pick the level and turn on **Use the graphics card** (AMD Radeon or another Vulkan
+GPU); its **About GPU acceleration** section says whether this PC has one. See
+[apps/desktop](apps/desktop).
 
 **Python:**
 
@@ -330,6 +342,53 @@ prediction errors instead, and `piedpiper train` on WAV files trains such a prio
 [docs/DESIGN.md](docs/DESIGN.md#audio-pcm-prediction-format-mode-5).
 
 
+## GPU acceleration (AMD Radeon and other Vulkan GPUs)
+
+The neural model can run on a graphics card instead of the processor. PiedPiper does this
+through **Vulkan**, so it works with **AMD Radeon** graphics (developed and tested on a Radeon
+RX 6800 XT with AMD's Windows driver) and with any other GPU whose Vulkan 1.2 driver keeps
+subnormal numbers and rounds to nearest even, which the GPU must report. No CUDA toolkit or
+special driver is needed beyond the normal graphics driver (on Windows, AMD Software: Adrenalin
+Edition includes Vulkan).
+
+| How | Command or setting |
+|---|---|
+| CLI, every neural stream on the GPU | `piedpiper --gpu FILE` (same as `--gpu-mode on`) |
+| CLI, only where the GPU is faster | `piedpiper --gpu-mode auto FILE` |
+| check this machine | `piedpiper gpu` |
+| Windows app | Start menu → **PiedPiper** → **Use the graphics card** (uses `auto`) |
+| Rust library | `CompressOptions::gpu` / `DecompressOptions::gpu` = `GpuMode::Auto` or `GpuMode::On` (cargo feature `gpu`) |
+
+<img src="docs/images/windows-settings-gpu.png" width="460" alt="Windows settings dialog with the Use the graphics card option and the About GPU acceleration section open, reporting that this computer's AMD Radeon RX 6800 XT is ready">
+
+**Same output, guaranteed by construction.** The GPU computes exactly the bits the CPU
+computes, so an archive made with the GPU is byte-identical to one made without it and
+decompresses on any machine, GPU or not. The kernels follow the CPU's determinism rules: no
+fused multiply-adds (every multiply and add is marked `NoContraction`, which a test checks in
+the shipped SPIR-V), division and square root in exact integer arithmetic, `exp` built from the
+same basic operations, and every sum in the CPU's order. On first use PiedPiper also runs a small
+network on both the GPU and the CPU and compares every number; if anything differs, or the GPU
+cannot promise IEEE arithmetic, it quietly stays on the CPU. If the GPU fails in the middle of a
+file (a driver reset, say), that file is coded again on the CPU, with the same result. Without a
+Vulkan driver the programs simply run on the CPU.
+
+**Speed.** Compressing benefits most, because the GPU can run whole segments ahead of the
+coder; decompressing has to wait for every symbol. Measured on an RX 6800 XT against a Ryzen 7
+5800 (8 cores):
+
+| | CPU, 16 threads | `--gpu` |
+|---|---:|---:|
+| 256 KB of source code, level 2 (whole `piedpiper` run) | 36.0 s | 20.7 s |
+| 2.2 MB of source code, level 2 (whole run) | 118.3 s | 40.3 s |
+| large text, level 2 (network only, tokens/s) | 24,300 | 149,000 |
+| large input, level 5 (network only, tokens/s) | 3,230 | 41,300 |
+| large input, level 9 (network only, tokens/s) | 496 | 10,600 |
+
+`--gpu-mode auto` uses the GPU for compressing streams of 64K tokens and more and for
+decompressing large inputs only, where it is faster; `--gpu` uses it for everything (small files
+can then be slower). The research behind this, with the full measurements, is in
+[experiments/gpu-vulkan](experiments/gpu-vulkan).
+
 ## Cross-platform guarantee
 
 [`testdata/golden`](testdata/golden) contains streams made by the Windows x86-64 build.
@@ -349,6 +408,8 @@ python -m unittest discover -s bindings/python/tests
 ```bash
 cargo build --release                 # CLI -> target/release/piedpiper
 cargo test -p piedpiper --release     # core tests (incl. gradient check)
+cargo test -p piedpiper --release --features gpu   # + GPU checks (bit-exact vs the CPU when a GPU is present)
+python scripts/gpu_shaders.py         # after editing a GPU shader: recompile the checked-in SPIR-V (needs glslc)
 cargo test -p piedpiper-media --release   # video recoders (synthetic H.264/HEVC/VP9/VP8 streams)
 python bindings/js/build.py           # WebAssembly -> bindings/js/src/piedpiper.wasm
 cd bindings/python && maturin build --release

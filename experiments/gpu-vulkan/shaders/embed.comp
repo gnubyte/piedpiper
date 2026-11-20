@@ -1,0 +1,11 @@
+#version 450
+#include "common.glsl"
+// h[r] = emb[tok[r]] for rows r0 .. r0+nrows (model.rs forward_step).
+// push: 0 r0, 1 nrows, 2 d, 3 emb, 4 h, 5 tok (U offset)
+layout(local_size_x = 64) in;
+void main() {
+    uint e = linear_id(), d = P(2);
+    if (e >= P(1) * d) return;
+    uint r = P(0) + e / d, j = e % d;
+    F[P(4) + r * d + j] = F[P(3) + U[P(5) + r] * d + j];
+}

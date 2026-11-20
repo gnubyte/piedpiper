@@ -1,0 +1,6 @@
+#version 450
+// The same kernel without `precise`: the driver may fuse multiply-adds into FMAs.
+// Only used to measure the effect; never part of the bit-exact model.
+#define FAST_MATH
+#include "common.glsl"
+#include "matmul_body.glsl"

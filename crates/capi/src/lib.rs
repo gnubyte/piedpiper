@@ -270,7 +270,7 @@ pub unsafe extern "C" fn pp_decompress(
     out: *mut pp_buffer,
 ) -> c_int {
     let input = slice(data, len);
-    let o = DecompressOptions { threads: threads as usize, prior: prior.as_ref().map(|p| p.0.clone()) };
+    let o = DecompressOptions { threads: threads as usize, prior: prior.as_ref().map(|p| p.0.clone()), ..Default::default() };
     run(progress, user, out, |f| piedpiper::decompress_with_progress(input, &o, f))
 }
 

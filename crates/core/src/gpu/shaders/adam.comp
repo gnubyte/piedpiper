@@ -1,0 +1,20 @@
+#version 450
+#include "common.glsl"
+// model.rs adam_rms (Adam with beta1 = 0), one parameter per thread:
+// g' = g*gscale; v = b2*v + (1-b2)*g'^2 (zeroed below 1e-30); p -= (lr*g') / (sqrt(v/bc2) + eps).
+// push: 0 n, 1 p, 2 v, 3 g, 4 gscale, 5 b2, 6 omb2, 7 bc2, 8 lr, 9 eps
+layout(local_size_x = 64) in;
+void main() {
+    uint i = linear_id();
+    if (i >= P(0)) return;
+    PRECISE float gi = F[P(3) + i] * PF(4);
+    PRECISE float vi = PF(5) * F[P(2) + i] + PF(6) * (gi * gi);
+    if (vi < C_ADAM_ZERO) vi = 0.0;
+    F[P(2) + i] = vi;
+    float root = f32_sqrt(f32_div(vi, PF(7)));
+    PRECISE float den = root + PF(9);
+    PRECISE float num = PF(8) * gi;
+    float upd = f32_div(num, den);
+    PRECISE float np = F[P(1) + i] - upd;
+    F[P(1) + i] = np;
+}

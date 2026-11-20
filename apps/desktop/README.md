@@ -8,9 +8,18 @@ Right-click compression for File Explorer and the Finder, with PiedPiper as the 
 | Extract next to the archive | double-click a `.pp` file, or **Extract here with PiedPiper** | double-click, or **Extract Here with PiedPiper** |
 | Extract into a new folder | **Extract to folder with PiedPiper** | **Extract to Folder with PiedPiper** |
 | Settings (compression level) | Start menu → PiedPiper | open PiedPiper.app |
+| GPU acceleration (AMD Radeon, Vulkan) | Start menu → PiedPiper → **Use the graphics card** | not available (no Vulkan on macOS) |
 
 Every command works on any number of selected items. A progress window shows how far along it
 is and how long is left, and **Cancel** stops it without leaving partial files behind.
+
+**GPU acceleration.** On Windows the settings window has a **Use the graphics card** option and
+an **About GPU acceleration** section. With the option on, compressing larger files (and
+extracting large archives) runs PiedPiper's network on the graphics card: AMD Radeon cards and
+other GPUs with a Vulkan driver that keeps exact IEEE arithmetic. The archives are byte-identical
+to those made without it and extract on any computer. The setting is `gpu = on` in the settings
+file; `piedpiper-archiver --gpu ...` turns it on for one run. PCs without a usable GPU simply
+stay on the processor.
 
 <img src="../../docs/images/windows-menu-compress.png" width="280" alt="File Explorer's right-click menu with Compress with PiedPiper"> <img src="../../docs/images/macos-progress.png" width="420" alt="Mac progress window">
 

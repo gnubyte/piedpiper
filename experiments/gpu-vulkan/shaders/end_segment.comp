@@ -1,0 +1,17 @@
+#version 450
+#include "common.glsl"
+// model.rs end_segment for one layer: keys and values of the last min(lseg, win) positions
+// move into the per-stream ring buffers.
+// push: 0 t0, 1 lseg, 2 ns, 3 d, 4 win, 5 seg_start, 6 kr, 7 qkv, 8 hist_k (layer), 9 hist_v (layer)
+layout(local_size_x = 64) in;
+void main() {
+    uint e = linear_id();
+    uint t0 = P(0), ns = P(2), d = P(3), win = P(4);
+    if (e >= (P(1) - t0) * ns * d) return;
+    uint t = t0 + e / (ns * d), b = (e / d) % ns, j = e % d;
+    uint slot = (P(5) + t) % win;
+    uint r = t * ns + b;
+    uint hi = (b * win + slot) * d + j;
+    F[P(8) + hi] = F[P(6) + r * d + j];
+    F[P(9) + hi] = F[P(7) + r * 3u * d + 2u * d + j];
+}

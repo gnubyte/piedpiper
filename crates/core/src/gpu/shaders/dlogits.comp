@@ -1,0 +1,22 @@
+#version 450
+#include "common.glsl"
+// model.rs compute_grads: dlogits = (p - onehot(target)) * inv_n in place over the
+// probabilities for active rows, zero for inactive rows. One workgroup per row.
+// push: 0 v, 1 probs, 2 target (U), 3 active (U), 4 inv_n
+layout(local_size_x = 64) in;
+void main() {
+    uint v = P(0), r = gl_WorkGroupID.x;
+    uint row = P(1) + r * v;
+    float inv_n = PF(4);
+    if (U[P(3) + r] != 0u) {
+        uint tgt = U[P(2) + r];
+        for (uint i = gl_LocalInvocationID.x; i < v; i += 64u) {
+            PRECISE float x = F[row + i];
+            if (i == tgt) x = x - 1.0;
+            x = x * inv_n;
+            F[row + i] = x;
+        }
+    } else {
+        for (uint i = gl_LocalInvocationID.x; i < v; i += 64u) F[row + i] = 0.0;
+    }
+}

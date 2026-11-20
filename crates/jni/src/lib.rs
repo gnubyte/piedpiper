@@ -619,7 +619,7 @@ pub extern "system" fn Java_io_piedpiper_PiedPiper_nativeDecompress<'local>(
     guard(&mut env, ptr::null_mut(), |env| {
         let data = read_bytes(env, &input, "input")?;
         let threads = non_negative(threads.into(), "threads")? as usize;
-        let opts = DecompressOptions { threads, prior: read_prior(env, &prior)? };
+        let opts = DecompressOptions { threads, prior: read_prior(env, &prior)?, ..Default::default() };
         let listener = Listener::new(env, &progress)?;
         let out = with_listener(listener.as_ref(), |cb| piedpiper::decompress_with_progress(&data, &opts, cb))?;
         drop(data);

@@ -1,0 +1,15 @@
+#version 450
+#include "common.glsl"
+// kernels.rs swiglu_v: sg = (g * sigmoid(g)) * u over gu = [g | u].
+// push: 0 r0, 1 nrows, 2 dff, 3 gu, 4 sg
+layout(local_size_x = 64) in;
+void main() {
+    uint e = linear_id(), dff = P(2);
+    if (e >= P(1) * dff) return;
+    uint r = P(0) + e / dff, i = e % dff;
+    float g = F[P(3) + r * 2u * dff + i];
+    float u = F[P(3) + r * 2u * dff + dff + i];
+    float s = pp_sigmoid(g);
+    PRECISE float v = (g * s) * u;
+    F[P(4) + r * dff + i] = v;
+}

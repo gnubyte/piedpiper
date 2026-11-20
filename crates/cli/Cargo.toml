@@ -12,4 +12,6 @@ name = "piedpiper"
 path = "src/main.rs"
 
 [dependencies]
-piedpiper = { path = "../core" }
+# `gpu`: the --gpu / --gpu-mode options (Vulkan, AMD Radeon tested). The Vulkan loader is opened
+# at run time, so the binary still runs on machines without a GPU driver.
+piedpiper = { path = "../core", features = ["gpu"] }

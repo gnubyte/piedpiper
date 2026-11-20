@@ -1,0 +1,30 @@
+#version 450
+#include "common.glsl"
+// The key/value half of model.rs attn_backward, one thread per element of dk / dv. On the CPU
+// the key row of local position t' (same stream) receives ds*q and att*dout from every later
+// active query t >= t' whose window still covers it, in ascending t, starting from zero; this
+// thread replays exactly that sequence for its element.
+// push: 0 lseg, 1 ns, 2 d, 3 nh, 4 hd, 5 win, 6 seg_start, 7 qr, 8 att, 9 ds, 10 dout, 11 dk,
+//       12 dv, 13 active (U)
+layout(local_size_x = 64) in;
+void main() {
+    uint e = linear_id();
+    uint lseg = P(0), ns = P(1), d = P(2), nh = P(3), hd = P(4), win = P(5), seg_start = P(6);
+    if (e >= lseg * ns * d) return;
+    uint rp = e / d, c = e % d, hh = c / hd;
+    uint tp = rp / ns, b = rp % ns;
+    PRECISE float ak = 0.0, av = 0.0;
+    for (uint t = tp; t < lseg; t++) {
+        uint r = t * ns + b;
+        if (U[P(13) + r] == 0u) continue;
+        uint nk, n_cur, first_slot;
+        attn_window(t, seg_start, win, nk, n_cur, first_slot);
+        uint w = t - tp;
+        if (w >= n_cur) continue;
+        uint ai = (r * nh + hh) * win + w;
+        ak = ak + F[P(9) + ai] * F[P(7) + r * d + c];
+        av = av + F[P(8) + ai] * F[P(10) + r * d + c];
+    }
+    F[P(11) + rp * d + c] = ak;
+    F[P(12) + rp * d + c] = av;
+}

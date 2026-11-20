@@ -260,7 +260,7 @@ fn decompress<'py>(
     prior: Option<PyRef<'py, PyPrior>>,
     progress: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let o = piedpiper::DecompressOptions { threads, prior: prior.map(|p| p.inner.clone()) };
+    let o = piedpiper::DecompressOptions { threads, prior: prior.map(|p| p.inner.clone()), ..Default::default() };
     let out = run_job(py, progress, |p| piedpiper::decompress_with_progress(data, &o, p))?;
     Ok(PyBytes::new(py, &out))
 }

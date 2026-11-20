@@ -1,0 +1,50 @@
+#version 450
+#include "common.glsl"
+// matmul.comp with 16x16 output tiles and one output per thread: four times as many
+// workgroups, for shapes whose 32x32 grid would leave most of the GPU idle (weight gradients
+// with few output tiles). Per-element arithmetic is identical: ascending t from +0.0.
+// push: 0 M, 1 N, 2 K, 3 a, 4 ars, 5 acs, 6 b, 7 brs, 8 bcs, 9 y, 10 yrs
+layout(local_size_x = 16, local_size_y = 16) in;
+const uint TS = 16u;
+const uint BK = 16u;
+shared float As[BK][TS + 1u];
+shared float Bs[BK][TS + 1u];
+
+void main() {
+    uint M = P(0), N = P(1), K = P(2);
+    uint a = P(3), ars = P(4), acs = P(5), b = P(6), brs = P(7), bcs = P(8), y = P(9), yrs = P(10);
+    uint i0 = gl_WorkGroupID.y * TS, j0 = gl_WorkGroupID.x * TS;
+    uint tx = gl_LocalInvocationID.x, ty = gl_LocalInvocationID.y;
+    uint e = ty * 16u + tx;
+    PRECISE float c = 0.0;
+    for (uint k0 = 0u; k0 < K; k0 += BK) {
+        uint kn = min(BK, K - k0);
+        uint ii, tt;
+        if (acs == 1u) {
+            ii = e / BK;
+            tt = e % BK;
+        } else {
+            tt = e / TS;
+            ii = e % TS;
+        }
+        float v = 0.0;
+        if (i0 + ii < M && tt < kn) v = F[a + (i0 + ii) * ars + (k0 + tt) * acs];
+        As[tt][ii] = v;
+        uint jj;
+        if (bcs == 1u) {
+            tt = e / TS;
+            jj = e % TS;
+        } else {
+            jj = e / BK;
+            tt = e % BK;
+        }
+        float w = 0.0;
+        if (j0 + jj < N && tt < kn) w = F[b + (k0 + tt) * brs + (j0 + jj) * bcs];
+        Bs[tt][jj] = w;
+        barrier();
+        for (uint t = 0u; t < kn; t++) c = c + As[t][ty] * Bs[t][tx];
+        barrier();
+    }
+    uint i = i0 + ty, j = j0 + tx;
+    if (i < M && j < N) F[y + i * yrs + j] = c;
+}

@@ -1,0 +1,21 @@
+#version 450
+#include "common.glsl"
+// Element-wise test kernel. out[i] = op(a[i], b[i]):
+//   0 soft a/b, 1 native a/b, 2 soft sqrt(a), 3 native sqrt(a), 4 exp(a), 5 sigmoid(a)
+// push: 0 n, 1 mode, 2 a, 3 b, 4 out
+layout(local_size_x = 64) in;
+void main() {
+    uint i = linear_id();
+    if (i >= P(0)) return;
+    float a = F[P(2) + i], b = F[P(3) + i];
+    float r;
+    switch (P(1)) {
+        case 0u: r = f32_div(a, b); break;
+        case 1u: { PRECISE float q = a / b; r = q; break; }
+        case 2u: r = f32_sqrt(a); break;
+        case 3u: { PRECISE float s = sqrt(a); r = s; break; }
+        case 4u: r = pp_exp(a); break;
+        default: r = pp_sigmoid(a); break;
+    }
+    F[P(4) + i] = r;
+}

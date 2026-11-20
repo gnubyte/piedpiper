@@ -1,0 +1,43 @@
+#version 450
+#include "common.glsl"
+// All gain-vector gradients of a training step at once (RMSNorm gains g1..g4, gf and the
+// QK-norm gains). Each was a running sum over rows on the CPU; the backward kernels stored the
+// rounded products, and this kernel adds them per column in ascending row order. Gains are
+// independent of each other and of the rest of the backward pass, so one dispatch reduces all
+// of them concurrently right before Adam instead of one serial dispatch each.
+// Workgroup (x, y) = (64-column block, gain). Table entry y (8 words, U):
+//   prod, ncols, rs (row stride), out, sub (rows per active flag), use_act, mult (rows per
+//   segment row), unused
+// push: 0 segment rows, 1 table (U), 2 active (U)
+layout(local_size_x = 256) in;
+shared float tile[64][65];
+shared uint s_use[64];
+void main() {
+    uint base = P(1) + gl_WorkGroupID.y * 8u;
+    uint prod = U[base], ncols = U[base + 1u], rs = U[base + 2u], outp = U[base + 3u];
+    uint sub = U[base + 4u], use_act = U[base + 5u], mult = U[base + 6u];
+    uint nrows = P(0) * mult;
+    uint c0 = gl_WorkGroupID.x * 64u, lid = gl_LocalInvocationID.x;
+    if (c0 >= ncols) return; // uniform for the workgroup
+    uint col = c0 + lid;
+    PRECISE float acc = 0.0;
+    if (lid < 64u && col < ncols) acc = F[outp + col];
+    for (uint r0 = 0u; r0 < nrows; r0 += 64u) {
+        uint cnt = min(64u, nrows - r0);
+        if (lid < 64u) s_use[lid] = (lid < cnt && (use_act == 0u || U[P(2) + (r0 + lid) / sub] != 0u)) ? 1u : 0u;
+        for (uint e = lid; e < 64u * 64u; e += 256u) {
+            uint rr = e / 64u, cc = e % 64u;
+            float v = 0.0;
+            if (rr < cnt && c0 + cc < ncols) v = F[prod + (r0 + rr) * rs + c0 + cc];
+            tile[rr][cc] = v;
+        }
+        barrier();
+        if (lid < 64u && col < ncols) {
+            for (uint rr = 0u; rr < cnt; rr++) {
+                if (s_use[rr] != 0u) acc = acc + tile[rr][lid];
+            }
+        }
+        barrier();
+    }
+    if (lid < 64u && col < ncols) F[outp + col] = acc;
+}

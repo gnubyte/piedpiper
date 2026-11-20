@@ -24,6 +24,9 @@ piedpiper = { path = "../../crates/core" }
 tar = { version = "0.4.46", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+# GPU acceleration (Vulkan; AMD Radeon tested) behind the "Use the graphics card" setting. The
+# Vulkan loader is opened at run time, so the app still runs on PCs without a GPU driver.
+piedpiper = { path = "../../crates/core", features = ["gpu"] }
 # `#[implement]` (COM objects) expands to paths in windows-core, so it is a direct dependency.
 windows-core = "0.62"
 windows = { version = "0.62", features = [

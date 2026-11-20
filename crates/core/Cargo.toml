@@ -30,6 +30,11 @@ jpeg = ["dep:lepton_jpeg"]
 audio = []
 # Section timers printed to stderr when PIEDPIPER_PROFILE is set (development only).
 profile = []
+# Run the neural model on a GPU through Vulkan (tested on AMD Radeon), selected per call with
+# `CompressOptions::gpu` / `DecompressOptions::gpu`. Output stays byte-identical to the CPU. The
+# Vulkan loader is opened at run time, so builds still run on machines without a GPU. Not for
+# WebAssembly.
+gpu = ["dep:ash"]
 
 [dependencies]
 rayon = { version = "1.10", optional = true }
@@ -37,6 +42,8 @@ piedpiper-media = { path = "../media", version = "0.1.0", optional = true }
 preflate-rs = { version = "0.7.6", optional = true }
 # Vendored with small patches (WebAssembly, reproducible headers): see third_party/lepton_jpeg.
 lepton_jpeg = { path = "../../third_party/lepton_jpeg", version = "0.5.8", optional = true }
+# Vulkan bindings for the `gpu` feature; load the system's Vulkan loader at run time.
+ash = { version = "0.38", optional = true }
 
 [dev-dependencies]
 # Makes a real zlib stream for the PNG test (already in the lockfile through flate2).

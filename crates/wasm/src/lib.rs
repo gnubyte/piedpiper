@@ -222,7 +222,7 @@ pub unsafe extern "C" fn pp_decompress(
 ) -> u32 {
     let data = bytes(input, input_len);
     let r = (|| {
-        let o = DecompressOptions { threads: 1, prior: load_prior(bytes(prior, prior_len))? };
+        let o = DecompressOptions { threads: 1, prior: load_prior(bytes(prior, prior_len))?, ..Default::default() };
         let mut f = progress_fn(progress != 0);
         piedpiper::decompress_with_progress(data, &o, &mut f)
     })();

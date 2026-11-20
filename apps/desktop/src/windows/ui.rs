@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 
 use ppdesktop::archive::selection_size;
-use ppdesktop::settings::level_label;
+use ppdesktop::settings::{gpu_line, level_label, GPU_ABOUT, GPU_OPTION};
 use ppdesktop::{fmt, log::log, Action, Error, Job, Outcome, Settings, Snapshot, Status};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::HWND;
@@ -17,7 +17,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TDCBF_CANCEL_BUTTON, TDCBF_OK_BUTTON,
-    TDF_ALLOW_DIALOG_CANCELLATION,
+    TDF_ALLOW_DIALOG_CANCELLATION, TDF_EXPAND_FOOTER_AREA, TDF_VERIFICATION_FLAG_CHECKED,
 };
 use windows::Win32::UI::Shell::{
     CLSID_ProgressDialog, IProgressDialog, PDTIMER_RESET, PROGDLG_AUTOTIME, PROGDLG_NORMAL,
@@ -238,7 +238,8 @@ fn make_int_resource(id: u16) -> PCWSTR {
 }
 
 /// Started from the Start menu (no arguments): explains where the commands are and lets the
-/// user pick the compression level.
+/// user pick the compression level and GPU acceleration (with an "About GPU acceleration"
+/// section that says which graphics cards work and whether this computer has one).
 pub fn settings_dialog(settings: &Settings) -> ExitCode {
     const FIRST_ID: i32 = 100;
     let labels: Vec<HSTRING> = (piedpiper::MIN_LEVEL..=piedpiper::MAX_LEVEL)
@@ -265,10 +266,16 @@ pub fn settings_dialog(settings: &Settings) -> ExitCode {
         env!("CARGO_PKG_VERSION"),
         piedpiper::FORMAT_VERSION
     ));
+    let gpu_text = HSTRING::from(GPU_OPTION);
+    let about = HSTRING::from(format!("{GPU_ABOUT}\n\n{}", gpu_line()));
+    let about_label = HSTRING::from("About GPU acceleration");
     let mut cfg = TASKDIALOGCONFIG {
         cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
         hwndParent: HWND::default(),
-        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION,
+        // The "About GPU acceleration" text opens in the footer, under the options.
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION
+            | TDF_EXPAND_FOOTER_AREA
+            | if settings.gpu { TDF_VERIFICATION_FLAG_CHECKED } else { Default::default() },
         dwCommonButtons: TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON,
         pszWindowTitle: PCWSTR(title.as_ptr()),
         pszMainInstruction: PCWSTR(main.as_ptr()),
@@ -277,6 +284,13 @@ pub fn settings_dialog(settings: &Settings) -> ExitCode {
         pRadioButtons: radios.as_ptr(),
         nDefaultRadioButton: FIRST_ID + settings.level as i32,
         pszFooter: PCWSTR(footer.as_ptr()),
+        // Without a fixed width the long "About GPU acceleration" text would stretch the
+        // dialog; this keeps its earlier size (dialog units).
+        cxWidth: 300,
+        pszVerificationText: PCWSTR(gpu_text.as_ptr()),
+        pszExpandedInformation: PCWSTR(about.as_ptr()),
+        pszCollapsedControlText: PCWSTR(about_label.as_ptr()),
+        pszExpandedControlText: PCWSTR(about_label.as_ptr()),
         ..Default::default()
     };
     unsafe {
@@ -287,7 +301,8 @@ pub fn settings_dialog(settings: &Settings) -> ExitCode {
         }
     }
     let (mut button, mut radio) = (0i32, 0i32);
-    if let Err(e) = unsafe { TaskDialogIndirect(&cfg, Some(&mut button), Some(&mut radio), None) } {
+    let mut use_gpu = windows::core::BOOL::from(settings.gpu);
+    if let Err(e) = unsafe { TaskDialogIndirect(&cfg, Some(&mut button), Some(&mut radio), Some(&mut use_gpu)) } {
         log(format!("settings dialog failed: {e}"));
         error_box(&format!("The settings window could not be opened: {e}"));
         return ExitCode::FAILURE;
@@ -295,6 +310,7 @@ pub fn settings_dialog(settings: &Settings) -> ExitCode {
     if button == IDOK.0 && radio > FIRST_ID {
         let mut s = settings.clone();
         s.level = (radio - FIRST_ID) as u32;
+        s.gpu = use_gpu.as_bool();
         if let Err(e) = s.save() {
             error_box(&format!("The settings could not be saved: {e}"));
             return ExitCode::FAILURE;

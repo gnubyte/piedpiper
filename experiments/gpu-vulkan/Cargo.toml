@@ -1,0 +1,28 @@
+[package]
+name = "piedpiper-gpu-experiment"
+description = "Experiment: run PiedPiper's online-learning Transformer on a Vulkan GPU, bit-exact with the CPU"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Standalone on purpose: this experiment is not part of the product workspace, so it can never
+# break the shared build. It compiles the core's model sources directly (see src/main.rs).
+[workspace]
+
+[features]
+default = ["parallel"]
+# Same meaning as in crates/core: the CPU reference model may use rayon threads.
+parallel = []
+# Declared only because the core's model.rs tests for it; never enabled here.
+profile = []
+
+[dependencies]
+# Thin Vulkan bindings; loads vulkan-1.dll / libvulkan at run time (MIT OR Apache-2.0).
+ash = "0.38"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

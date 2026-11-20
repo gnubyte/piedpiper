@@ -720,6 +720,45 @@ search; the FLAC encoder that ships with Windows came out larger than that estim
   and video modes it stays on with `--prior` (which then codes the errors) or explicit model
   settings (which apply to the meta stream).
 
+## GPU acceleration (Vulkan)
+
+The network can also run as Vulkan compute shaders (`crates/core/src/gpu`, cargo feature `gpu`,
+enabled in the CLI and the Windows app; `--gpu`, `--gpu-mode auto|on|off`). It was developed on an
+AMD Radeon RX 6800 XT. The GPU path reproduces the CPU's arithmetic exactly, so it changes speed
+and nothing else: the same bytes, decodable on any CPU. The determinism rules above carry over:
+
+* **No contraction.** Every multiply and add is `precise` (SPIR-V `NoContraction`). Without it,
+  64-88% of matmul outputs differed from the CPU on the test GPU (FMA contraction). A unit test
+  walks every shipped SPIR-V module and fails on an unprotected `OpFMul`/`OpFAdd`/`OpFSub`, on
+  `OpFDiv`, and on GLSL.std.450 `Sqrt`, `Exp`, `Fma`, `FMin`/`FMax` and friends.
+* **Exact division and square root.** Vulkan guarantees only `+ - *` to be correctly rounded
+  (division may be off by 2.5 ulp; the test GPU's native `sqrt` differed on 10% of inputs), so
+  both are integer algorithms (restoring division, digit-by-digit root) with IEEE rounding,
+  subnormals included.
+* **IEEE environment.** The kernels declare DenormPreserve, RoundingModeRTE and
+  SignedZeroInfNanPreserve; devices that do not support all three are not used.
+* **Same functions, same order.** `exp` is `fpmath::exp` transcribed; matmuls sum in ascending
+  order per element (tiling never splits a sum); dot products keep the 8-lane pattern; softmax,
+  attention and gain-gradient sums stay sequential in the CPU's order. Only the maxima are
+  computed in parallel, where the order provably cannot matter. Weight gradients cannot use
+  split-K and nothing can use tensor cores.
+* **Self-test.** The first use in a process runs a small network (uneven streams, a wrapped
+  attention window, tails in every 8-lane sum, encoder and decoder paths) on both the CPU and the
+  GPU and compares every probability and weight. Any difference and the GPU is not used.
+* **Fail-over.** A lost device or a submission that does not finish within 30 s disables the GPU
+  for the process, and the stream is coded again on the CPU from the start (the same bytes). The
+  encoder sizes its batches so a submission takes about 50-400 ms, well below the 2 s after which
+  Windows resets a GPU that seems hung. `PIEDPIPER_GPU_FAIL_AFTER=N` injects such a failure for
+  testing.
+
+Compressing gains the most: the network never sees the match model or the coder, so the encoder
+knows every input of a segment in advance and the GPU computes all positions of up to 8 segments
+(forward pass, training step, memory update) per submission, while the coder reads the
+probabilities in the usual order. Decoding must wait for each symbol, so every position is one
+GPU round trip; it only pays off for large inputs with many streams. `GpuMode::Auto` encodes on
+the GPU from 64K tokens and decodes there only with 256+ rows per update. Measurements and the
+research notes are in `experiments/gpu-vulkan`.
+
 ## Performance notes
 
 - The decoder is inherently sequential within a stream, so parallelism comes from

@@ -17,6 +17,60 @@ use crate::model::{prof, Model};
 use crate::prior::{builtin_prior, builtin_prior_by_id, Prior};
 use crate::tokenizer::{looks_like_text, Bpe, Tokenizer};
 
+/// Where the neural model runs. The output is byte-identical either way: the GPU path
+/// reproduces the CPU's arithmetic exactly, so every build decompresses every file. GPU support
+/// needs the `gpu` cargo feature and a Vulkan 1.2 GPU (tested on AMD Radeon); anything else runs
+/// on the CPU.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuMode {
+    /// Always the CPU.
+    #[default]
+    Off,
+    /// The GPU when one is usable and the stream gains from it: compressing 64K tokens or
+    /// more, decompressing large inputs (decoding waits on the GPU for every symbol).
+    Auto,
+    /// The GPU for every neural stream, whenever one is usable (small inputs can then be
+    /// slower than on the CPU).
+    On,
+}
+
+/// Whether this build and machine can run the neural model on a GPU (see [`gpu_status`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuStatus {
+    /// A GPU that passed the self-test against the CPU model.
+    Available { device: String, driver: String },
+    /// Why not: no GPU support in this build, no Vulkan driver, a device without the required
+    /// float controls, or a failed self-test.
+    Unavailable(String),
+}
+
+/// Whether this build can run the neural model on a GPU at all (cargo feature `gpu`).
+pub const GPU_SUPPORT: bool = cfg!(feature = "gpu");
+
+static GPU_STREAMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many neural streams this process has run on a GPU so far (for diagnostics, e.g. to tell
+/// whether [`GpuMode::Auto`] picked the GPU for a file).
+pub fn gpu_stream_count() -> u64 {
+    GPU_STREAMS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Opens the GPU (once per process), runs a small network on it and on the CPU, and reports
+/// whether they agree bit for bit. [`GpuMode::Auto`] and [`GpuMode::On`] use the GPU only when
+/// this says [`GpuStatus::Available`].
+pub fn gpu_status() -> GpuStatus {
+    #[cfg(feature = "gpu")]
+    {
+        let _fp = FpGuard::new();
+        match crate::gpu::status() {
+            Ok((device, driver)) => GpuStatus::Available { device, driver },
+            Err(e) => GpuStatus::Unavailable(e),
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    GpuStatus::Unavailable("this build has no GPU support (cargo feature `gpu`)".into())
+}
+
 /// How the input is turned into symbols.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenizerChoice {
@@ -66,6 +120,9 @@ pub struct CompressOptions {
     /// of the neural model (format mode 5). A `prior` or `model` override then applies to
     /// the prediction residuals. Default `true`.
     pub audio: bool,
+    /// Run the neural model on a GPU (Vulkan, e.g. AMD Radeon). Never changes the output.
+    /// Default [`GpuMode::Off`].
+    pub gpu: GpuMode,
 }
 
 impl Default for CompressOptions {
@@ -85,6 +142,7 @@ impl Default for CompressOptions {
             jpeg: true,
             filter: FilterChoice::Auto,
             audio: true,
+            gpu: GpuMode::Off,
         }
     }
 }
@@ -101,6 +159,8 @@ pub struct DecompressOptions {
     pub threads: usize,
     /// The prior the stream was compressed with, if any.
     pub prior: Option<Arc<Prior>>,
+    /// Run the neural model on a GPU (Vulkan, e.g. AMD Radeon). Default [`GpuMode::Off`].
+    pub gpu: GpuMode,
 }
 
 /// Header information of a compressed stream.
@@ -128,11 +188,16 @@ pub struct Info {
 pub type ProgressFn<'a> = dyn FnMut(u64, u64) -> bool + Send + 'a;
 
 trait SymbolCoder {
+    /// True when the symbols are known before coding (encoding, measuring): the GPU can then
+    /// run whole segments ahead of the coder.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    const KNOWS_SYMBOLS: bool;
     fn code(&mut self, probs: &[f32], sym: u16) -> u16;
 }
 
 struct Enc(Encoder);
 impl SymbolCoder for Enc {
+    const KNOWS_SYMBOLS: bool = true;
     #[inline]
     fn code(&mut self, probs: &[f32], sym: u16) -> u16 {
         self.0.encode_symbol(probs, sym as usize);
@@ -142,6 +207,7 @@ impl SymbolCoder for Enc {
 
 struct Dec<'a>(Decoder<'a>);
 impl SymbolCoder for Dec<'_> {
+    const KNOWS_SYMBOLS: bool = false;
     #[inline]
     fn code(&mut self, probs: &[f32], _sym: u16) -> u16 {
         self.0.decode_symbol(probs) as u16
@@ -153,6 +219,7 @@ struct Meter {
     bits: f64,
 }
 impl SymbolCoder for Meter {
+    const KNOWS_SYMBOLS: bool = true;
     #[inline]
     fn code(&mut self, probs: &[f32], sym: u16) -> u16 {
         self.bits -= (probs[sym as usize].max(1e-30) as f64).log2();
@@ -162,7 +229,7 @@ impl SymbolCoder for Meter {
 
 /// Stream `b` covers tokens `starts[b]..starts[b] + lens[b]`; earlier streams are at most
 /// one token longer than later ones.
-fn split_streams(n: usize, ns: usize) -> (Vec<usize>, Vec<usize>) {
+pub(crate) fn split_streams(n: usize, ns: usize) -> (Vec<usize>, Vec<usize>) {
     let base = n / ns;
     let extra = n % ns;
     let mut starts = Vec::with_capacity(ns);
@@ -177,25 +244,171 @@ fn split_streams(n: usize, ns: usize) -> (Vec<usize>, Vec<usize>) {
     (starts, lens)
 }
 
-/// The shared encode/decode/train loop.
-fn run<C: SymbolCoder>(
-    model: &mut Model,
-    tokens: &mut [u16],
-    coder: &mut C,
-    match_min: usize,
-    match_long: usize,
-    progress: &mut dyn FnMut(usize, usize) -> bool,
-) -> Result<()> {
-    let ns = model.n_streams();
-    let seg = model.segment_len();
-    let n = tokens.len();
-    let (starts, lens) = split_streams(n, ns);
-    let max_len = lens[0];
-    let bos = model.bos();
-    let mut inputs = vec![bos; ns];
-    let mut active = vec![false; ns];
-    // Match models: up to two per stream (short and long context), tables sized to the
-    // stream (<= 16 MB each in total).
+/// The network that drives the coder: the CPU model, or the same model on a GPU (which
+/// computes the same bits).
+// One per stream; boxing the CPU model would only add an indirection to its hot path.
+#[allow(clippy::large_enum_variant)]
+enum Net {
+    Cpu(Model),
+    #[cfg(feature = "gpu")]
+    Gpu(Box<crate::gpu::GpuNet>),
+}
+
+/// [`GpuMode::Auto`] uses the GPU where it wins: compressing 64K tokens or more (it runs
+/// whole segments ahead of the coder), and decompressing only large inputs, whose batches of
+/// 256+ rows amortise one GPU round trip per position.
+#[cfg(feature = "gpu")]
+fn wants_gpu(mode: GpuMode, mc: &ModelConfig, n_tokens: usize, decoding: bool) -> bool {
+    let rows = mc.n_streams as usize * mc.seg_len as usize;
+    match mode {
+        GpuMode::Off => false,
+        GpuMode::On => n_tokens < 1 << 31,
+        GpuMode::Auto => (1 << 16..1 << 31).contains(&n_tokens) && (!decoding || rows >= 256),
+    }
+}
+
+impl Net {
+    /// The network for a stream of `n_tokens`: on the GPU when `mode` asks for it and a usable
+    /// GPU passed its self-test, otherwise the CPU model. `weights` replaces the initial
+    /// weights (a prior).
+    #[allow(unused_variables)]
+    fn new(vocab: usize, mc: &ModelConfig, tc: &TrainConfig, weights: Option<&[f32]>, mode: GpuMode, n_tokens: usize, decoding: bool) -> Net {
+        let mut model = Model::new(vocab, mc, tc);
+        if let Some(w) = weights {
+            model.params_mut().copy_from_slice(w);
+            model.params_changed();
+        }
+        #[cfg(feature = "gpu")]
+        if wants_gpu(mode, mc, n_tokens, decoding) {
+            if let Ok(g) = crate::gpu::model_for(vocab, mc, tc, model.params()) {
+                return Net::Gpu(Box::new(crate::gpu::GpuNet::new(g)));
+            }
+        }
+        Net::Cpu(model)
+    }
+
+    /// True when the GPU failed during this stream (the stream must then be coded again on the
+    /// CPU, which gives the same bytes).
+    fn gpu_failed(&self) -> bool {
+        match self {
+            Net::Cpu(_) => false,
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.failed,
+        }
+    }
+
+    /// Counts a stream that ran to the end on the GPU (see [`gpu_stream_count`]).
+    fn note_finished(&self) {
+        #[cfg(feature = "gpu")]
+        if let Net::Gpu(g) = self {
+            if !g.failed {
+                GPU_STREAMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The weights of a CPU network (prior training reads them back).
+    fn cpu_params(&self) -> Option<&[f32]> {
+        match self {
+            Net::Cpu(m) => Some(m.params()),
+            #[cfg(feature = "gpu")]
+            Net::Gpu(_) => None,
+        }
+    }
+
+    fn n_streams(&self) -> usize {
+        match self {
+            Net::Cpu(m) => m.n_streams(),
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.model.n_streams(),
+        }
+    }
+
+    fn segment_len(&self) -> usize {
+        match self {
+            Net::Cpu(m) => m.segment_len(),
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.model.segment_len(),
+        }
+    }
+
+    fn bos(&self) -> u32 {
+        match self {
+            Net::Cpu(m) => m.bos(),
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.model.bos(),
+        }
+    }
+
+    fn vocab(&self) -> usize {
+        match self {
+            Net::Cpu(m) => m.vocab,
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.model.vocab,
+        }
+    }
+
+    fn begin_segment(&mut self, pos: u64) {
+        match self {
+            Net::Cpu(m) => m.begin_segment(pos),
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.begin_segment(pos),
+        }
+    }
+
+    fn forward_step(&mut self, t: usize, inputs: &[u32], active: &[bool]) -> Result<()> {
+        match self {
+            Net::Cpu(m) => {
+                m.forward_step(t, inputs, active);
+                Ok(())
+            }
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.forward_step(t, inputs, active),
+        }
+    }
+
+    fn probs_row(&self, t: usize, b: usize) -> &[f32] {
+        match self {
+            Net::Cpu(m) => m.probs_row(t, b),
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.probs_row(t, b),
+        }
+    }
+
+    fn set_target(&mut self, t: usize, b: usize, sym: u32) {
+        match self {
+            Net::Cpu(m) => m.set_target(t, b, sym),
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.set_target(t, b, sym),
+        }
+    }
+
+    fn train_step(&mut self, lseg: usize) {
+        match self {
+            Net::Cpu(m) => {
+                m.train_step(lseg);
+            }
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.train_step(lseg),
+        }
+    }
+
+    fn end_segment(&mut self, lseg: usize) -> Result<()> {
+        match self {
+            Net::Cpu(m) => {
+                m.end_segment(lseg);
+                Ok(())
+            }
+            #[cfg(feature = "gpu")]
+            Net::Gpu(g) => g.end_segment(lseg),
+        }
+    }
+}
+
+/// Match models: up to two per stream (short and long context), tables sized to the stream
+/// (<= 16 MB each in total).
+fn match_models(lens: &[usize], match_min: usize, match_long: usize) -> (Vec<MatchModel>, Vec<MatchModel>) {
+    let ns = lens.len();
     let budget_bits = (22 - (usize::BITS - ns.leading_zeros()).saturating_sub(1)).clamp(12, 20);
     let make = |m: usize| -> Vec<MatchModel> {
         if m > 0 {
@@ -204,60 +417,104 @@ fn run<C: SymbolCoder>(
             Vec::new()
         }
     };
-    let mut matchers = make(match_min);
-    let mut long_matchers = make(match_long);
-    let mut mixed = vec![0f32; model.vocab];
+    (make(match_min), make(match_long))
+}
+
+/// Codes the symbol at position `p` of stream `b` with the network's distribution `row`, mixed
+/// with the stream's match models, updates them, and returns the symbol.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn code_symbol<C: SymbolCoder>(
+    row: &[f32],
+    tokens: &mut [u16],
+    starts: &[usize],
+    lens: &[usize],
+    b: usize,
+    p: usize,
+    matchers: &mut [MatchModel],
+    long_matchers: &mut [MatchModel],
+    mixed: &mut [f32],
+    coder: &mut C,
+) -> u16 {
+    let idx = starts[b] + p;
+    let stream = &tokens[starts[b]..starts[b] + lens[b]];
+    let pred_l = long_matchers.get(b).and_then(|m| m.predict(stream, p));
+    let pred_s = matchers.get(b).and_then(|m| m.predict(stream, p));
+    let sym = if pred_l.is_some() || pred_s.is_some() {
+        // Long context first (more reliable), then the short one.
+        mixed.copy_from_slice(row);
+        let mut used = false;
+        if let Some((tok, bk)) = pred_l {
+            used |= long_matchers[b].mix(mixed, tok, bk);
+        }
+        if let Some((tok, bk)) = pred_s {
+            used |= matchers[b].mix(mixed, tok, bk);
+        }
+        coder.code(if used { &mixed[..] } else { row }, tokens[idx])
+    } else {
+        coder.code(row, tokens[idx])
+    };
+    tokens[idx] = sym;
+    let stream = &tokens[starts[b]..starts[b] + lens[b]];
+    if let Some(m) = long_matchers.get_mut(b) {
+        m.update(stream, p);
+    }
+    if let Some(m) = matchers.get_mut(b) {
+        m.update(stream, p);
+    }
+    sym
+}
+
+/// The shared encode/decode/train loop.
+fn run<C: SymbolCoder>(
+    net: &mut Net,
+    tokens: &mut [u16],
+    coder: &mut C,
+    match_min: usize,
+    match_long: usize,
+    progress: &mut dyn FnMut(usize, usize) -> bool,
+) -> Result<()> {
+    #[cfg(feature = "gpu")]
+    if C::KNOWS_SYMBOLS {
+        if let Net::Gpu(g) = net {
+            return run_gpu_encoder(g, tokens, coder, match_min, match_long, progress);
+        }
+    }
+    let ns = net.n_streams();
+    let seg = net.segment_len();
+    let n = tokens.len();
+    let (starts, lens) = split_streams(n, ns);
+    let max_len = lens[0];
+    let bos = net.bos();
+    let mut inputs = vec![bos; ns];
+    let mut active = vec![false; ns];
+    let (mut matchers, mut long_matchers) = match_models(&lens, match_min, match_long);
+    let mut mixed = vec![0f32; net.vocab()];
     let mut pos = 0usize;
     while pos < max_len {
         let lseg = seg.min(max_len - pos);
-        model.begin_segment(pos as u64);
+        net.begin_segment(pos as u64);
         for t in 0..lseg {
             let p = pos + t;
             for b in 0..ns {
                 active[b] = p < lens[b];
                 inputs[b] = if p == 0 || !active[b] { bos } else { tokens[starts[b] + p - 1] as u32 };
             }
-            prof!(0, model.forward_step(t, &inputs, &active));
+            prof!(0, net.forward_step(t, &inputs, &active))?;
             prof!(4, {
                 for b in 0..ns {
                     if active[b] {
-                        let idx = starts[b] + p;
-                        let row = model.probs_row(t, b);
-                        let stream = &tokens[starts[b]..starts[b] + lens[b]];
-                        let pred_l = long_matchers.get(b).and_then(|m| m.predict(stream, p));
-                        let pred_s = matchers.get(b).and_then(|m| m.predict(stream, p));
-                        let sym = if pred_l.is_some() || pred_s.is_some() {
-                            // Long context first (more reliable), then the short one.
-                            mixed.copy_from_slice(row);
-                            let mut used = false;
-                            if let Some((tok, bk)) = pred_l {
-                                used |= long_matchers[b].mix(&mut mixed, tok, bk);
-                            }
-                            if let Some((tok, bk)) = pred_s {
-                                used |= matchers[b].mix(&mut mixed, tok, bk);
-                            }
-                            coder.code(if used { &mixed[..] } else { row }, tokens[idx])
-                        } else {
-                            coder.code(row, tokens[idx])
-                        };
-                        tokens[idx] = sym;
-                        model.set_target(t, b, sym as u32);
-                        let stream = &tokens[starts[b]..starts[b] + lens[b]];
-                        if let Some(m) = long_matchers.get_mut(b) {
-                            m.update(stream, p);
-                        }
-                        if let Some(m) = matchers.get_mut(b) {
-                            m.update(stream, p);
-                        }
+                        let sym = code_symbol(net.probs_row(t, b), tokens, &starts, &lens, b, p, &mut matchers, &mut long_matchers, &mut mixed, coder);
+                        net.set_target(t, b, sym as u32);
                     }
                 }
             });
         }
         pos += lseg;
         if pos < max_len {
-            model.train_step(lseg);
+            net.train_step(lseg);
         }
-        prof!(10, model.end_segment(lseg));
+        prof!(10, net.end_segment(lseg))?;
         let done: usize = lens.iter().map(|&l| l.min(pos)).sum();
         if !progress(done, n) {
             return Err(Error::Cancelled);
@@ -266,6 +523,90 @@ fn run<C: SymbolCoder>(
     #[cfg(feature = "profile")]
     if std::env::var_os("PIEDPIPER_PROFILE").is_some() {
         crate::model::profiler::report();
+    }
+    Ok(())
+}
+
+/// [`run`] when the symbols are known in advance and the network is on a GPU: every input of a
+/// segment exists before it is coded, so the GPU runs up to `KMAX` segments (forward pass,
+/// training step, memory update) per submission, and the coder then reads their probabilities
+/// in the usual order. The result is bit-identical to the position-by-position loop.
+///
+/// Batches grow and shrink so a submission takes roughly 50-400 ms: enough to amortise its
+/// fixed cost, and far below the 2 s after which Windows resets a GPU that seems stuck.
+#[cfg(feature = "gpu")]
+fn run_gpu_encoder<C: SymbolCoder>(
+    net: &mut crate::gpu::GpuNet,
+    tokens: &mut [u16],
+    coder: &mut C,
+    match_min: usize,
+    match_long: usize,
+    progress: &mut dyn FnMut(usize, usize) -> bool,
+) -> Result<()> {
+    use crate::gpu::{SegIo, KMAX};
+    let mut kcur = 1usize;
+    let ns = net.model.n_streams();
+    let seg = net.model.segment_len();
+    let n = tokens.len();
+    let (starts, lens) = split_streams(n, ns);
+    let max_len = lens[0];
+    let bos = net.model.bos();
+    let (mut matchers, mut long_matchers) = match_models(&lens, match_min, match_long);
+    let mut mixed = vec![0f32; net.model.vocab];
+    type Staged = (usize, usize, Vec<u32>, Vec<bool>, Vec<u32>);
+    let mut pos = 0usize;
+    while pos < max_len {
+        let mut batch: Vec<Staged> = Vec::with_capacity(KMAX);
+        let mut p0 = pos;
+        while p0 < max_len && batch.len() < kcur {
+            let lseg = seg.min(max_len - p0);
+            let mut inputs = vec![bos; lseg * ns];
+            let mut active = vec![false; lseg * ns];
+            let mut targets = vec![0u32; lseg * ns];
+            for t in 0..lseg {
+                let p = p0 + t;
+                for b in 0..ns {
+                    let r = t * ns + b;
+                    active[r] = p < lens[b];
+                    if active[r] {
+                        inputs[r] = if p == 0 { bos } else { tokens[starts[b] + p - 1] as u32 };
+                        targets[r] = tokens[starts[b] + p] as u32;
+                    }
+                }
+            }
+            batch.push((p0, lseg, inputs, active, targets));
+            p0 += lseg;
+        }
+        let segs: Vec<SegIo> = batch
+            .iter()
+            .map(|(p, l, i, a, t)| SegIo { pos: *p as u64, lseg: *l, inputs: i, active: a, targets: t, train: p + l < max_len })
+            .collect();
+        let t0 = std::time::Instant::now();
+        if let Err(e) = net.model.run_segments(&segs) {
+            return Err(net.fail(e));
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        if secs < 0.05 && kcur < KMAX {
+            kcur *= 2;
+        } else if secs > 0.4 && kcur > 1 {
+            kcur /= 2;
+        }
+        let g = &net.model;
+        for (k, (sp, lseg, _, _, _)) in batch.iter().enumerate() {
+            for t in 0..*lseg {
+                let p = sp + t;
+                for b in 0..ns {
+                    if p < lens[b] {
+                        code_symbol(g.probs_row_k(k, t, b), tokens, &starts, &lens, b, p, &mut matchers, &mut long_matchers, &mut mixed, coder);
+                    }
+                }
+            }
+            let done: usize = lens.iter().map(|&l| l.min(sp + lseg)).sum();
+            if !progress(done, n) {
+                return Err(Error::Cancelled);
+            }
+        }
+        pos = p0;
     }
     Ok(())
 }
@@ -306,7 +647,7 @@ fn pick_prior_lr(
         model.params_changed();
         let mut trial = tokens[..n].to_vec();
         let mut enc = Enc(Encoder::new(Vec::new()));
-        run(&mut model, &mut trial, &mut enc, match_min, match_long, &mut |_, _| true)?;
+        run(&mut Net::Cpu(model), &mut trial, &mut enc, match_min, match_long, &mut |_, _| true)?;
         Ok(enc.0.finish().len())
     };
     let mut best = (size(p, tc)?, p.clone(), *tc);
@@ -595,6 +936,7 @@ fn compress_at(input: &[u8], opts: &CompressOptions, progress: &mut ProgressFn<'
     // Built-in priors (not a caller's own) may be swapped for an alternate of the same level.
     let builtin_chosen = opts.prior.is_none();
     let level = opts.level;
+    let gpu = opts.gpu;
     let total = input.len() as u64;
     let out = with_threads(opts.threads, move || -> Result<Vec<u8>> {
         let (tok, base_cfg) = match &prior {
@@ -644,13 +986,22 @@ fn compress_at(input: &[u8], opts: &CompressOptions, progress: &mut ProgressFn<'
             _ => (prior.clone(), tc),
         };
         format::write_neural(&mut out, &tok, &mc, &tc, n as u64, prior.as_ref().map_or(0, |p| p.id()), match_min as u8, match_long as u8, &filter);
-        let mut model = Model::new(tok.vocab_size(), &mc, &tc);
-        if let Some(p) = &prior {
-            model.params_mut().copy_from_slice(&p.weights);
-            model.params_changed();
-        }
+        let weights = prior.as_ref().map(|p| &p.weights[..]);
+        let mut net = Net::new(tok.vocab_size(), &mc, &tc, weights, gpu, n, false);
+        let header = out.clone();
         let mut enc = Enc(Encoder::new(out));
-        run(&mut model, &mut tokens, &mut enc, match_min, match_long, &mut |d, n| progress(scale(d, n, total), total))?;
+        match run(&mut net, &mut tokens, &mut enc, match_min, match_long, &mut |d, n| progress(scale(d, n, total), total)) {
+            Ok(()) => net.note_finished(),
+            // The GPU failed mid-stream (it is not used again): code the stream again on the CPU,
+            // which gives the same bytes.
+            Err(_) if net.gpu_failed() => {
+                drop(net);
+                let mut cpu = Net::new(tok.vocab_size(), &mc, &tc, weights, GpuMode::Off, n, false);
+                enc = Enc(Encoder::new(header));
+                run(&mut cpu, &mut tokens, &mut enc, match_min, match_long, &mut |d, n| progress(scale(d, n, total), total))?;
+            }
+            Err(e) => return Err(e),
+        }
         Ok(enc.0.finish())
     })?;
     if opts.allow_stored && out.len() >= input.len() + 10 {
@@ -725,13 +1076,22 @@ fn decompress_at(data: &[u8], opts: &DecompressOptions, progress: &mut ProgressF
             let total = hdr.orig_len;
             with_threads(opts.threads, || -> Result<Vec<u8>> {
                 let mut tokens = vec![0u16; n];
-                let mut model = Model::new(hdr.tokenizer.vocab_size(), &hdr.model, &hdr.train);
-                if let Some(p) = &prior {
-                    model.params_mut().copy_from_slice(&p.weights);
-                    model.params_changed();
-                }
+                let weights = prior.as_ref().map(|p| &p.weights[..]);
+                let mut net = Net::new(hdr.tokenizer.vocab_size(), &hdr.model, &hdr.train, weights, opts.gpu, n, true);
                 let mut dec = Dec(Decoder::new(&data[hdr.payload..]));
-                run(&mut model, &mut tokens, &mut dec, hdr.match_min as usize, hdr.match_long as usize, &mut |d, n| progress(scale(d, n, total), total))?;
+                let (mm, ml) = (hdr.match_min as usize, hdr.match_long as usize);
+                match run(&mut net, &mut tokens, &mut dec, mm, ml, &mut |d, n| progress(scale(d, n, total), total)) {
+                    Ok(()) => net.note_finished(),
+                    // The GPU failed mid-stream: decode again from the start on the CPU.
+                    Err(_) if net.gpu_failed() => {
+                        drop(net);
+                        let mut cpu = Net::new(hdr.tokenizer.vocab_size(), &hdr.model, &hdr.train, weights, GpuMode::Off, n, true);
+                        tokens.iter_mut().for_each(|t| *t = 0);
+                        let mut dec = Dec(Decoder::new(&data[hdr.payload..]));
+                        run(&mut cpu, &mut tokens, &mut dec, mm, ml, &mut |d, n| progress(scale(d, n, total), total))?;
+                    }
+                    Err(e) => return Err(e),
+                }
                 let mut out = Vec::with_capacity(orig);
                 hdr.tokenizer.decode_into(&tokens, &mut out);
                 hdr.filter.decode(out)
@@ -864,11 +1224,12 @@ pub fn train_prior(corpus: &[u8], opts: &TrainOptions, progress: &mut ProgressFn
             let mut meter = Meter { bits: 0.0 };
             let mut toks = tokens.clone();
             let base = e as u64 * corpus.len() as u64;
-            run(&mut model, &mut toks, &mut meter, 0, 0, &mut |d, n| {
+            let mut net = Net::Cpu(model);
+            run(&mut net, &mut toks, &mut meter, 0, 0, &mut |d, n| {
                 progress(base + scale(d, n, corpus.len() as u64), total)
             })?;
             epoch_bpb.push(meter.bits / corpus.len() as f64);
-            weights = Some(model.params().to_vec());
+            weights = net.cpu_params().map(|w| w.to_vec());
         }
         let prior = Prior::encode(&tok, &mc, weights.as_deref().unwrap_or(&[]));
         Ok(TrainReport { prior, epoch_bpb })
@@ -890,7 +1251,7 @@ mod tests {
 
     fn roundtrip(data: &[u8], opts: &CompressOptions) -> Vec<u8> {
         let c = compress(data, opts).unwrap();
-        let d = decompress_with_progress(&c, &DecompressOptions { threads: 0, prior: opts.prior.clone() }, &mut |_, _| true)
+        let d = decompress_with_progress(&c, &DecompressOptions { threads: 0, prior: opts.prior.clone(), ..Default::default() }, &mut |_, _| true)
             .unwrap();
         assert_eq!(d, data);
         c

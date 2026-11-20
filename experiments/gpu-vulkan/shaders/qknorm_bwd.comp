@@ -1,0 +1,95 @@
+#version 450
+#include "common.glsl"
+// QK-norm + RoPE backward of model.rs layer_backward, one workgroup per (row, head): builds
+// the d(qkv) row and stores the gain-gradient terms rope_inv(dq)*qh and rope_inv(dk)*kh,
+// which colsum.comp then adds over active rows and heads in the CPU's order.
+// push: 0 ns, 1 d, 2 nh, 3 hd, 4 dq, 5 dk, 6 dv, 7 qh, 8 kh, 9 qri, 10 kri, 11 gq, 12 gk,
+//       13 bqkv, 14 t1q, 15 t1k, 16 cs, 17 active (U)
+layout(local_size_x = 64) in;
+shared float t1q[1024], t1k[1024], t2q[1024], t2k[1024];
+shared float s_mq, s_mk;
+void main() {
+    uint ns = P(0), d = P(1), nh = P(2), hd = P(3);
+    uint r = gl_WorkGroupID.x / nh, hh = gl_WorkGroupID.x % nh;
+    uint t = r / ns;
+    uint row = P(13) + r * 3u * d;
+    uint lid = gl_LocalInvocationID.x;
+    if (U[P(17) + r] == 0u) {
+        for (uint i = lid; i < hd; i += 64u) {
+            F[row + hh * hd + i] = 0.0;
+            F[row + d + hh * hd + i] = 0.0;
+            F[row + 2u * d + hh * hd + i] = 0.0;
+        }
+        return;
+    }
+    uint o = r * d + hh * hd;
+    uint half_ = hd / 2u;
+    uint cs = P(16) + t * hd;
+    for (uint i = lid; i < half_; i += 64u) {
+        float c = F[cs + i], s = F[cs + half_ + i];
+        float a = F[P(4) + o + i], b = F[P(4) + o + i + half_];
+        PRECISE float x0 = a * c + b * s;
+        PRECISE float x1 = b * c - a * s;
+        t1q[i] = x0;
+        t1q[i + half_] = x1;
+        a = F[P(5) + o + i];
+        b = F[P(5) + o + i + half_];
+        PRECISE float y0 = a * c + b * s;
+        PRECISE float y1 = b * c - a * s;
+        t1k[i] = y0;
+        t1k[i + half_] = y1;
+    }
+    barrier();
+    for (uint i = lid; i < hd; i += 64u) {
+        // Gain-gradient terms t1 * xh, rounded as on the CPU; colsum.comp adds them in order.
+        PRECISE float pq = t1q[i] * F[P(7) + o + i];
+        F[P(14) + o + i] = pq;
+        PRECISE float pk = t1k[i] * F[P(8) + o + i];
+        F[P(15) + o + i] = pk;
+        PRECISE float uq = F[P(11) + i] * t1q[i];
+        t2q[i] = uq;
+        PRECISE float uk = F[P(12) + i] * t1k[i];
+        t2k[i] = uk;
+    }
+    barrier();
+    if (lid < 2u) {
+        uint xh = (lid == 0u) ? P(7) + o : P(8) + o;
+        uint chunks = hd / 8u;
+        PRECISE float l0 = 0.0, l1 = 0.0, l2 = 0.0, l3 = 0.0, l4 = 0.0, l5 = 0.0, l6 = 0.0, l7 = 0.0;
+        for (uint c = 0u; c < chunks; c++) {
+            uint q = c * 8u;
+            if (lid == 0u) {
+                l0 = l0 + t2q[q] * F[xh + q];
+                l1 = l1 + t2q[q + 1u] * F[xh + q + 1u];
+                l2 = l2 + t2q[q + 2u] * F[xh + q + 2u];
+                l3 = l3 + t2q[q + 3u] * F[xh + q + 3u];
+                l4 = l4 + t2q[q + 4u] * F[xh + q + 4u];
+                l5 = l5 + t2q[q + 5u] * F[xh + q + 5u];
+                l6 = l6 + t2q[q + 6u] * F[xh + q + 6u];
+                l7 = l7 + t2q[q + 7u] * F[xh + q + 7u];
+            } else {
+                l0 = l0 + t2k[q] * F[xh + q];
+                l1 = l1 + t2k[q + 1u] * F[xh + q + 1u];
+                l2 = l2 + t2k[q + 2u] * F[xh + q + 2u];
+                l3 = l3 + t2k[q + 3u] * F[xh + q + 3u];
+                l4 = l4 + t2k[q + 4u] * F[xh + q + 4u];
+                l5 = l5 + t2k[q + 5u] * F[xh + q + 5u];
+                l6 = l6 + t2k[q + 6u] * F[xh + q + 6u];
+                l7 = l7 + t2k[q + 7u] * F[xh + q + 7u];
+            }
+        }
+        PRECISE float s = ((l0 + l4) + (l1 + l5)) + ((l2 + l6) + (l3 + l7));
+        for (uint i = chunks * 8u; i < hd; i++) s = s + ((lid == 0u) ? t2q[i] : t2k[i]) * F[xh + i];
+        float m = f32_div(s, float(hd));
+        if (lid == 0u) s_mq = m; else s_mk = m;
+    }
+    barrier();
+    float qri = F[P(9) + r * nh + hh], kri = F[P(10) + r * nh + hh];
+    for (uint i = lid; i < hd; i += 64u) {
+        PRECISE float vq = qri * (t2q[i] - F[P(7) + o + i] * s_mq);
+        F[row + hh * hd + i] = vq;
+        PRECISE float vk = kri * (t2k[i] - F[P(8) + o + i] * s_mk);
+        F[row + d + hh * hd + i] = vk;
+        F[row + 2u * d + hh * hd + i] = F[P(6) + o + i];
+    }
+}
