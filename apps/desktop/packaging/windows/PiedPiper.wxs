@@ -41,11 +41,21 @@
         <File Id="ArchiverExe" Source="$(var.ExePath)" KeyPath="yes" />
       </Component>
 
-      <Component Id="Notices">
-        <File Id="License" Source="$(var.RepoRoot)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+      <!-- License and notice files: one component each, so WiX can generate their GUIDs
+           (a component with several unversioned files cannot have an automatic one). -->
+      <Component Id="License">
+        <File Id="License" Source="$(var.RepoRoot)\LICENSE" Name="LICENSE.txt" />
+      </Component>
+      <Component Id="ThirdPartyNotices">
         <File Id="ThirdPartyNotices" Source="$(var.RepoRoot)\THIRD_PARTY_NOTICES.md" />
+      </Component>
+      <Component Id="ThirdPartyLicenses">
         <File Id="ThirdPartyLicenses" Source="$(var.AppDir)\THIRD_PARTY_LICENSES.md" />
+      </Component>
+      <Component Id="LeptonLicense">
         <File Id="LeptonLicense" Source="$(var.RepoRoot)\third_party\lepton_jpeg\LICENSE.txt" Name="LICENSE-lepton_jpeg.txt" />
+      </Component>
+      <Component Id="LeptonNotice">
         <File Id="LeptonNotice" Source="$(var.RepoRoot)\third_party\lepton_jpeg\NOTICE.txt" Name="NOTICE-lepton_jpeg.txt" />
       </Component>
 
