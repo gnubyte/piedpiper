@@ -1,0 +1,70 @@
+[package]
+name = "piedpiper-desktop"
+description = "Right-click Compress / Extract for Windows File Explorer and the macOS Finder, powered by PiedPiper"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.89"
+publish = false
+
+# The desktop app is its own workspace: it pulls in platform GUI crates (windows-rs, objc2)
+# that the SDK workspace at the repository root should not have to resolve or lock.
+[workspace]
+
+[lib]
+name = "ppdesktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "piedpiper-archiver"
+path = "src/main.rs"
+
+[dependencies]
+piedpiper = { path = "../../crates/core" }
+tar = { version = "0.4.46", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+# `#[implement]` (COM objects) expands to paths in windows-core, so it is a direct dependency.
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"
+
+# preflate-rs (deflate recompression in the core) depends on the LGPL-3.0 `cabac` crate. As in
+# the root workspace, swap in PiedPiper's own MIT implementation so no LGPL code is linked.
+[patch.crates-io]
+cabac = { path = "../../crates/cabac-shim" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Tests run the neural model; unoptimised builds are far too slow for that.
+[profile.test]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3

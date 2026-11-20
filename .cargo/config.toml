@@ -1,0 +1,4 @@
+# WebAssembly: enable the fixed-width SIMD proposal (IEEE-exact, supported by every
+# current browser and Node >= 16). Relaxed-SIMD is never used (it is non-deterministic).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

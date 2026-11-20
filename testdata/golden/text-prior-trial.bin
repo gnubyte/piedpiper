@@ -1,0 +1,197 @@
+# Design notes
+
+## The method (TufaZip)
+
+[TufaZip](https://tufalabs.ai/research/tufazip/) (Tufa Labs, 2026) placed #2 on Matt
+Mahoney's Large Text Compression Benchmark with a single predictor: a decoder-only
+Transformer that **trains online while it compresses**.
+
+```
+for each token:
+    p = model(context)            # next-token distribution
+    arithmetic_code(token, p)     # costs -log2 p(token) bits
+    model.adam_step(token)        # decoder repeats this exactly
+```
+
+The decoder runs the same loop, so the weights never have to be sent: it decodes a token
+with `p`, then takes the same training step. TufaZip v2 also starts from a quantised
+offline prior, trains on replayed history, and uses a 163M-parameter network (12 layers,
+d=1024, Peri-LN, QK-norm, RoPE, SwiGLU, 4K word vocabulary).
+
+The original needs two NVIDIA B200 GPUs, takes about 7 days per GB, and decodes only on
+the exact CUDA/cuDNN/PyTorch build that encoded. PiedPiper keeps the method and
+re-engineers it for portability.
+
+| | TufaZip v2 | PiedPiper |
+|---|---|---|
+| Hardware | 2× B200, CUDA 13 | any CPU: x86-64 (SSE2/AVX2), ARM64/ARMv7 (NEON/VFP), WebAssembly SIMD |
+| Determinism | same software stack only | **bit-exact across OS, CPU, SIMD width, thread count and language binding** |
+| Network | 163M params, d=1024, 12 layers | 0.14–40M params (levels 1–9), same block design |
+| Context | 192 tokens, recomputed per token | `window` tokens, Transformer-XL key/value memory |
+| Update | every token, batch of 64 streams | every `seg_len` tokens per stream, `n_streams` streams |
+| Tokenizer | 4K word vocabulary (enwik9-specific) | bytes, or word-aware BPE learned per file (stored in the header) |
+| Prior | quantised offline prior (4.3 MB) | optional `.ppp` priors (f16), trainable with `piedpiper train` |
+| Optimizer | Adam β=(0, 0.9999), clip 0.25 | Adam (β1=0 by default, β2=0.9999), optional clip |
+| Scope | enwik9 | any file |
+
+## Determinism
+
+The encoder and decoder must compute **identical** probabilities, or decoding diverges
+after the first difference. A file compressed on an x86 laptop has to decode on an ARM
+phone and in a browser. Neural networks are usually not reproducible across hardware.
+These rules make PiedPiper reproducible:
+
+1. **Only IEEE-754 basic operations.** `+ − × ÷` and `sqrt` are correctly rounded on every
+   target (SSE2/AVX2, NEON, VFP, WebAssembly). Rust never fuses `a*b+c` into an FMA unless
+   asked, so the code's operation order is the computation.
+2. **No libm.** `exp`, `sin` and `cos` differ between C libraries and JS engines, so
+   `fpmath.rs` builds them from basic operations. RoPE frequencies use bisection with
+   multiplications only, not `powf`.
+3. **Fixed summation order.** Every matrix element is accumulated in ascending inner index
+   from `0.0`. Tiling, SIMD width and threads only change which elements are computed
+   together, never one element's arithmetic. Dot products use a fixed 8-lane pattern and
+   reduction tree. Gradients are reduced in a fixed row order.
+4. **Explicit, IEEE-exact SIMD.** Kernels are written once against an 8-lane vector type
+   (`simd.rs`) with one implementation per instruction set: AVX2 (runtime-detected), SSE2,
+   AArch64 NEON and WebAssembly SIMD128. Each lane does a plain IEEE `+ − × ÷ √`, so every
+   backend gives the same bits. 32-bit ARM NEON is avoided because it flushes subnormals;
+   ARMv7 uses the scalar backend.
+5. **Thread-count invariance.** Work is partitioned by output region, never by splitting a
+   sum.
+6. **No subnormal surprises.** Softmax exponents are clamped so probabilities stay normal
+   floats. On top of that, every thread doing model math pins the FP control register
+   (MXCSR / FPCR / FPSCR) to IEEE defaults, because a host process may have enabled
+   flush-to-zero (shared libraries built with `-ffast-math` do this).
+7. **Integer coding.** Probabilities become integer frequencies `max(1, floor(p·2²⁴))`, so
+   the range coder is pure integer arithmetic.
+8. **One loop.** Encoder and decoder share `codec::run`; the encoder processes positions
+   one at a time exactly as the decoder must.
+
+`testdata/golden` holds streams made on Windows x86-64. CI decodes and re-encodes them on
+Linux (x86-64 and ARM64), macOS (Intel and Apple Silicon), Windows ARM64, WebAssembly
+(Node), the Python wheel, the C ABI and Android.
+
+## Network
+
+Peri-LN blocks: `h += N_out(F(N_in(h)))` for attention and feed-forward, all RMSNorm with
+learned gains. Attention has per-head QK-RMSNorm, then RoPE (split-half pairing,
+base 10000), with the scale fixed at `1/sqrt(head_dim)`. The feed-forward is SwiGLU. There
+are no biases. Embeddings are untied. The output matrix starts at zero, so the first
+prediction is uniform.
+
+## Online training
+
+Tokens are split into `n_streams` contiguous streams processed in lockstep. One step
+codes a segment of `seg_len` positions in every stream. After it, one Adam step goes on
+the mean cross-entropy of what was just coded. Gradients flow through the current segment;
+keys and values of earlier segments stay in a per-stream ring buffer as stop-gradient
+memory.
+
+Small inputs are learning-limited and get small batches (2 streams × 4 tokens). Large
+inputs get more streams for throughput (`config::batch_policy`).
+
+Adam with β1 = 0 (TufaZip/NNCP) needs no first-moment buffer. The learning rate warms up
+linearly, then decays hyperbolically to `lr_min`. That schedule needs no knowledge of the
+input length.
+
+## Priors
+
+Learning from scratch is what limits small inputs, so levels 1–3 ship with **built-in
+priors** (`crates/core/priors/text-{s,m,l}.ppp`, 0.3 / 0.8 / 1.7 MB in f16). They are
+byte-level networks trained offline with `piedpiper train` on a mixed corpus: Python, Java
+and C sources, technical English prose, HTML and XML, all permissively licensed. Text-like
+input up to 8 MB starts from them, fine-tuned at 0.4× the level's learning rate, or at
+half that when it pays: a lower rate keeps more of what the prior knows, which helps on text
+like its training data (Java −3.6%, prose −2.2%, XML −1.1% at level 2) and hurts on text
+unlike it (synthetic JSON records +7%). For inputs of 8 KB and more the encoder compresses a
+16K-token prefix both ways and keeps the rate that produced fewer bytes. That is an integer
+comparison of deterministic coder output, so every platform picks the same rate, and the
+rate travels in the header like any other setting.
+Binary input trains from scratch, because a text prior hurts there. A stream records the
+prior's 64-bit id; decoders find built-in priors by that id, and those ids never change
+once released. Custom priors (`.ppp`) can be trained on your own data and passed explicitly.
+
+## Match model
+
+The network attends to the last `window` tokens (64–320), but logs, CSV, JSON and source
+code repeat themselves over far longer distances. Like the match models of PAQ and cmix,
+each stream keeps hash tables of earlier contexts, follows the most recent earlier
+occurrence of the current context, and predicts the token that came next there. Its
+reliability is learned online from integer hit/miss counts, and the predicted token's
+probability is raised to that estimate when it beats the network's.
+
+There are two match models per stream: a long one (12-byte context) that locks onto
+repeated records and lines, and a short one (3-byte context) that acts like a
+recency-weighted order-3 context model, a strong complement to a small network that has
+only just started learning. BPE streams use a single 4-token model. A sweep over context
+lengths at level 2 on held-out text found 3 + 12 best or within 0.2% of the best on every
+file type, against the single 8-byte model it replaced: XML −6%, C −2%, HTML −2%, CSV −4%,
+executables −3%. Photo residuals from the image filter are the exception (the short model
+only adds noise there), so they get the long model alone.
+
+The counts are kept per match length *and* per bin of the network's own probability for
+the predicted token. Without the second index the match model hurt structured text: the
+network already predicts the repetitive parts of logs and JSON almost perfectly, so the
+match model mattered mostly where the network was unsure — random ids, numbers, timestamps
+— exactly where an old occurrence is least reliable. Conditioning on the network's
+confidence learns that.
+
+Level 2, bits per byte, both match models against none:
+
+| file | without | with | change |
+|---|---:|---:|---:|
+| English prose | 1.635 | 1.471 | -10.0% |
+| Java source | 0.994 | 0.830 | -16.4% |
+| C source | 1.251 | 1.065 | -14.9% |
+| XML | 0.779 | 0.662 | -15.0% |
+| HTML | 0.699 | 0.622 | -11.0% |
+| server log (synthetic) | 0.861 | 0.857 | -0.5% |
+| CSV orders (synthetic) | 0.983 | 0.866 | -11.9% |
+| JSON records (synthetic) | 0.367 | 0.351 | -4.4% |
+
+The models' state is integers and their mixing a fixed sequence of f32 operations, so they
+are as bit-exact as the rest. The network keeps training on its own, unmixed prediction.
+
+## Deflate recompression (format mode 4)
+
+PNG, the ZIP family (docx, xlsx, pptx, odt, epub, jar, apk), gzip, PDF and zlib files are
+already compressed, so no model gains anything on their bytes. `crates/core/src/deflate.rs`
+finds their DEFLATE streams and inflates them with
+[preflate-rs](https://github.com/microsoft/preflate-rs), which records the small amount of
+information needed to recreate the *exact* original compressed bytes. The container bytes
+plus those corrections go into one PiedPiper stream and the inflated content (the XML,
+class files, pixels or text) into another, so text gets the text priors and the match model
+while headers do not dilute it. Every stream is verified to recreate byte-exactly before it
+is used and the whole file is verified to restore; streams that preflate cannot model
+(for example zlib-ng's fast levels) stay raw. Measured against `xz -9e`: an XLSX workbook
+61% smaller, a JAR 35%, a PNG 12%.
+
+Files inside those containers often deserve a mode of their own, so mode 4 carries each
+*embedded file* as a separate part that is compressed like a file on its own: an inflated
+ZIP entry (Word, PowerPoint, EPUB), a stored ZIP entry (APKs store media uncompressed) or a
+PDF `/DCTDecode` image. Photos go to the Lepton recoder: a PDF, a DOCX and an APK holding a
+1 MB photo each came out 29–30% smaller this way, where xz saves 0–3%. Nested containers
+(a ZIP of Office documents, the classes.jar inside an Android AAR, PNGs stored in an APK)
+are expanded again, up to three levels deep, and MP4 videos reach the video recoder. Raw
+images inside PDFs (FlateDecode XObjects: 8-bit gray, RGB or CMYK rows, optionally with PNG
+predictors) become parts too, with the image filter set up from the image dictionary; on a
+PDF holding a photo as raw RGB rows that took the result from 74% to 51% of the file. Tar
+archives have no DEFLATE of their own but use the same machinery: members that are files of
+their own become parts and the headers stay raw, and a `.tar.gz` reaches it through its
+inflated tar. A 256 KB tarball of a photo, two Office files and Java source went from
+199,562 to 98,994 bytes (xz: 200,672).
+
+preflate-rs reproduces streams written by zlib-compatible encoders. Streams from encoders
+with different match finders (zlib-ng at higher levels, miniz) can fail its prediction;
+those stay raw and the file falls back to plain neural coding.
+
+preflate-rs depends on the LGPL-3.0 `cabac` crate. Because PiedPiper links statically into
+every SDK, the workspace patches in `crates/cabac-shim`, its own MIT implementation of the
+few `cabac` interfaces preflate-rs calls (an LZMA-style binary range coder with adaptive
+probabilities). See THIRD_PARTY_NOTICES.md.
+
+## Executable filters
+
+Machine code stores call and jump targets relative to the instruction, so calls to one
+function look different at every call site. Before tokenizing, executables (detected from
+their PE, ELF or Mach-O header) get the branch filters known from x

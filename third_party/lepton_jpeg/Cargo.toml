@@ -1,0 +1,40 @@
+# Vendored copy of lepton_jpeg 0.5.8 (https://github.com/microsoft/lepton_jpeg_rust),
+# Apache-2.0, with small patches for PiedPiper. See PIEDPIPER-PATCHES.md.
+
+[package]
+edition = "2024"
+rust-version = "1.89"
+name = "lepton_jpeg"
+version = "0.5.8"
+authors = ["Kristof Roomp <kristofr@microsoft.com>"]
+description = "Rust port of the Lepton lossless JPEG compression library (vendored and patched for PiedPiper)"
+readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/microsoft/lepton_jpeg_rust"
+publish = false
+
+[features]
+compression_stats = []
+default = []
+detailed_tracing = []
+# Kept so upstream cfg(feature = "micro_benchmark") attributes stay valid; the module is removed.
+micro_benchmark = []
+
+[lib]
+name = "lepton_jpeg"
+path = "src/lib.rs"
+
+[dependencies]
+bytemuck = "1"
+byteorder = "1.4"
+default-boxed = "0.2"
+flate2 = "1.0"
+log = "0.4"
+wide = "0.8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+thread-priority = "1.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+cpu-time = "1.0"
+thread-priority = "1.0"

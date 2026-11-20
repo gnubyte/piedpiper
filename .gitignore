@@ -1,0 +1,22 @@
+/target
+**/target
+bindings/python/dist/
+bindings/python/python/piedpiper/*.pyd
+bindings/python/python/piedpiper/*.so
+__pycache__/
+*.pyc
+bindings/js/node_modules/
+bindings/js/*.tgz
+# Built by bindings/js/build.py and bindings/android/build-native.sh (CI rebuilds them)
+bindings/js/src/piedpiper.wasm
+bindings/android/piedpiper/src/main/jniLibs/
+bindings/android/.gradle/
+bindings/android/**/build/
+bindings/android/local.properties
+bindings/android/.idea/
+bindings/android/.kotlin/
+*.part
+# Installers built by apps/desktop/packaging (dist/*.msi, dist/*.dmg)
+/dist/
+# Local Claude Code session files (launch configs, locks)
+/.claude/

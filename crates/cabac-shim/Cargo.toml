@@ -1,0 +1,12 @@
+[package]
+name = "cabac"
+version = "0.15.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = """PiedPiper's own adaptive binary range coder, exposing the small part of the \
+`cabac` crate API that preflate-rs uses. Patched in for the LGPL-3.0 `cabac` crate so that \
+no PiedPiper binary contains LGPL code."""
+
+[lib]
+path = "src/lib.rs"

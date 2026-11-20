@@ -1,0 +1,43 @@
+[package]
+name = "piedpiper"
+description = "Neural lossless compression: an online-learning Transformer driving an arithmetic coder (the TufaZip method), bit-exact on every platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+keywords = ["compression", "transformer", "arithmetic-coding", "neural", "lossless"]
+categories = ["compression"]
+
+[features]
+default = ["parallel", "builtin-priors", "media", "deflate", "jpeg", "audio"]
+# Embed the three text priors (~2.8 MB) used automatically at levels 1-3.
+builtin-priors = []
+# Multi-threaded kernels (rayon). Thread count never changes the output bytes.
+parallel = ["dep:rayon"]
+# Lossless recompression of H.264 video in MP4/MOV files (format mode 2). Without it,
+# such streams cannot be decompressed.
+media = ["dep:piedpiper-media"]
+# Lossless recompression of DEFLATE streams in PNG, ZIP/Office/JAR, gzip and PDF files
+# (format mode 4). Without it, such streams cannot be decompressed.
+deflate = ["dep:preflate-rs"]
+# Lossless recompression of JPEG images with Lepton (format mode 3). Without it, such
+# streams cannot be decompressed.
+jpeg = ["dep:lepton_jpeg"]
+# Lossless audio for 16-bit PCM WAV files: stereo decorrelation and adaptive prediction
+# before the neural model (format mode 5). No dependencies. Without it, such streams
+# cannot be decompressed.
+audio = []
+# Section timers printed to stderr when PIEDPIPER_PROFILE is set (development only).
+profile = []
+
+[dependencies]
+rayon = { version = "1.10", optional = true }
+piedpiper-media = { path = "../media", version = "0.1.0", optional = true }
+preflate-rs = { version = "0.7.6", optional = true }
+# Vendored with small patches (WebAssembly, reproducible headers): see third_party/lepton_jpeg.
+lepton_jpeg = { path = "../../third_party/lepton_jpeg", version = "0.5.8", optional = true }
+
+[dev-dependencies]
+# Makes a real zlib stream for the PNG test (already in the lockfile through flate2).
+miniz_oxide = "0.9"

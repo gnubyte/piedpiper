@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="24dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:textAppearance="@android:style/TextAppearance.Material.Headline"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/subtitle"
+            style="@style/Body"
+            android:textColor="@color/text_secondary" />
+
+        <!-- Input -->
+        <LinearLayout style="@style/Section">
+
+            <TextView
+                style="@style/SectionTitle"
+                android:text="@string/section_input" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/pick"
+                    style="@android:style/Widget.Material.Button.Colored"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/choose_file" />
+
+                <Button
+                    android:id="@+id/sample"
+                    style="@android:style/Widget.Material.Button.Borderless.Colored"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/use_sample" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/inputInfo"
+                style="@style/Body"
+                android:layout_marginTop="8dp"
+                android:fontFeatureSettings="tnum"
+                android:text="@string/no_input" />
+        </LinearLayout>
+
+        <!-- Level -->
+        <LinearLayout style="@style/Section">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/SectionTitle"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="@string/section_level" />
+
+                <TextView
+                    android:id="@+id/levelValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="@android:style/TextAppearance.Material.Subhead"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <SeekBar
+                android:id="@+id/level"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="8"
+                android:progress="1" />
+
+            <TextView
+                style="@style/Body"
+                android:layout_marginTop="4dp"
+                android:text="@string/level_hint"
+                android:textAppearance="@android:style/TextAppearance.Material.Caption" />
+        </LinearLayout>
+
+        <!-- Actions -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/compress"
+                style="@android:style/Widget.Material.Button.Colored"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:text="@string/compress" />
+
+            <Button
+                android:id="@+id/decompress"
+                style="@android:style/Widget.Material.Button.Colored"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="@string/decompress" />
+        </LinearLayout>
+
+        <!-- Progress and result -->
+        <LinearLayout style="@style/Section">
+
+            <TextView
+                style="@style/SectionTitle"
+                android:text="@string/section_result" />
+
+            <ProgressBar
+                android:id="@+id/progress"
+                style="@android:style/Widget.Material.ProgressBar.Horizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="1000" />
+
+            <TextView
+                android:id="@+id/status"
+                style="@style/Body"
+                android:layout_marginTop="8dp"
+                android:fontFeatureSettings="tnum"
+                android:text="@string/idle"
+                android:textIsSelectable="true" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/cancel"
+                    style="@android:style/Widget.Material.Button.Borderless.Colored"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/cancel" />
+
+                <Button
+                    android:id="@+id/reuse"
+                    style="@android:style/Widget.Material.Button.Borderless.Colored"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/use_as_input" />
+
+                <Button
+                    android:id="@+id/save"
+                    style="@android:style/Widget.Material.Button.Borderless.Colored"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/save" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

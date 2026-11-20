@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PiedPiper golden tests</title>
+<style>
+  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 16px; background: #fff; color: #111; }
+  .PASS { color: #116611; } .FAIL { color: #b00020; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>PiedPiper WebAssembly golden tests</h1>
+<p>Serve the repository root over HTTP (e.g. <code>python -m http.server</code>) and open
+<code>/bindings/js/test/golden.html</code>.</p>
+<pre id="log">running…</pre>
+<script type="module">
+  import { init } from '../src/index.js';
+  import { runGolden } from './golden-lib.js';
+  const out = document.getElementById('log');
+  out.textContent = '';
+  const log = (m) => {
+    const line = document.createElement('div');
+    line.className = m.split(' ')[0];
+    line.textContent = m;
+    out.appendChild(line);
+  };
+  try {
+    await init();
+    const load = async (name) => {
+      const r = await fetch(new URL(`../../../testdata/golden/${name}`, import.meta.url));
+      if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+      return new Uint8Array(await r.arrayBuffer());
+    };
+    const res = await runGolden(load, log);
+    document.title = res.failed ? 'FAILED' : 'PASSED';
+  } catch (e) {
+    log(`FAIL exception: ${e && e.stack ? e.stack : e}`);
+    document.title = 'FAILED';
+  }
+</script>
+</body>
+</html>

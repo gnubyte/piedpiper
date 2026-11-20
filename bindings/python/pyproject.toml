@@ -1,0 +1,43 @@
+[build-system]
+# 1.9.3: first release with complete PEP 639 support (License-Expression, license-files in sdists).
+requires = ["maturin>=1.9.3,<2"]
+build-backend = "maturin"
+
+[project]
+name = "piedpiper"
+version = "0.1.0"
+description = "Neural lossless compression (the TufaZip method: an online-learning Transformer driving an arithmetic coder), bit-identical on every platform"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+# PEP 639: packed into the wheel's .dist-info/licenses/ (and into the sdist). maturin cannot reach
+# outside this directory, so these are copies of the repository-root files; refresh them with
+# `python ../sync_notices.py` after changing the originals. A missing file is skipped silently.
+# lepton_jpeg's two files get flat names because maturin moves license files to the sdist root,
+# which already holds the vendored crate's own third_party/lepton_jpeg/LICENSE.txt and NOTICE.txt.
+license-files = [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_LICENSES.md",
+    "LICENSE-lepton_jpeg.txt",  # third_party/lepton_jpeg/LICENSE.txt
+    "NOTICE-lepton_jpeg.txt",  # third_party/lepton_jpeg/NOTICE.txt
+]
+keywords = ["compression", "neural", "transformer", "arithmetic-coding", "lossless", "tufazip"]
+# No "License ::" classifier: PEP 639 replaces it with the license expression above, and PyPI
+# rejects uploads that carry both.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: System :: Archiving :: Compression",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "piedpiper._native"
+bindings = "pyo3"
+include = [{ path = "python/piedpiper/py.typed", format = "wheel" }]

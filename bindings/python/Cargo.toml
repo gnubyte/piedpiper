@@ -1,0 +1,15 @@
+[package]
+name = "piedpiper-python"
+description = "Python bindings of PiedPiper (PyO3)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+piedpiper = { path = "../../crates/core" }
+pyo3 = { version = "0.30", features = ["abi3-py39"] }

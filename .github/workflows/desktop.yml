@@ -1,0 +1,164 @@
+name: Desktop apps
+
+# Builds, tests and packages the right-click app (apps/desktop): an MSI for Windows and a DMG
+# for macOS. Every run uploads both as workflow artifacts; a pushed v* tag also attaches them
+# to that GitHub release (next to the CLI, wheels, npm package and AAR from release.yml).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    # Path filters do not apply to tag pushes, so releases always build.
+    paths:
+      - "apps/desktop/**"
+      - "crates/core/**"
+      - "crates/media/**"
+      - "crates/cabac-shim/**"
+      - "third_party/**"
+      - "LICENSE"
+      - "THIRD_PARTY_NOTICES.md"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "crates/core/**"
+      - "crates/media/**"
+      - "crates/cabac-shim/**"
+      - "third_party/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows MSI
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"
+          else v="$(sed -n 's/^version *= *"\(.*\)"/\1/p' apps/desktop/Cargo.toml | head -1)"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: cargo test --release --locked --manifest-path apps/desktop/Cargo.toml
+
+      - name: Install WiX Toolset 5
+        # Pinned: WiX 6+ requires accepting the OSMF EULA before it builds anything.
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+
+      - name: Build MSI
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: ./apps/desktop/packaging/windows/build-msi.ps1 -Version "${{ steps.version.outputs.version }}" -OutDir dist
+
+      - name: Install and run from the command line
+        shell: pwsh
+        run: ./apps/desktop/packaging/windows/smoke-test.ps1 -Stage Install -Msi (Get-Item dist/*.msi).FullName
+
+      - name: Explorer context menu, end to end
+        # Drives the installed DropTarget verbs through the shell's IContextMenu, the code path
+        # File Explorer uses. Not yet proven on hosted runners, so it reports without blocking.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo build --release --locked --manifest-path apps/desktop/Cargo.toml --example shell_invoke
+          ./apps/desktop/packaging/windows/smoke-test.ps1 -Stage Explorer -Harness apps/desktop/target/release/examples/shell_invoke.exe
+
+      - name: Uninstall
+        shell: pwsh
+        run: ./apps/desktop/packaging/windows/smoke-test.ps1 -Stage Uninstall -Msi (Get-Item dist/*.msi).FullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PiedPiper-windows
+          path: dist/*.msi
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: dist/*.msi
+
+  macos:
+    name: macOS DMG
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"
+          else v="$(sed -n 's/^version *= *"\(.*\)"/\1/p' apps/desktop/Cargo.toml | head -1)"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: cargo test --release --locked --manifest-path apps/desktop/Cargo.toml
+
+      - name: Import the Developer ID certificate
+        # Optional: without these secrets the app is signed ad hoc and not notarized.
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        if: env.MACOS_CERTIFICATE_P12 != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Build app and DMG
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash apps/desktop/packaging/macos/build-dmg.sh "${{ steps.version.outputs.version }}"
+
+      - name: Check the app
+        run: bash apps/desktop/packaging/macos/smoke-test.sh app dist/*.dmg
+
+      - name: Finder services, end to end
+        # Installs the app and runs its services through NSPerformService, as the Finder does.
+        # Not yet proven on hosted runners, so it reports without blocking.
+        continue-on-error: true
+        run: bash apps/desktop/packaging/macos/smoke-test.sh services dist/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PiedPiper-macos
+          path: dist/*.dmg
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: dist/*.dmg

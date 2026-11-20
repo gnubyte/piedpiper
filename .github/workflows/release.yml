@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cli:
+    name: cli (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }} -p piedpiper-cli -p piedpiper-capi
+      - name: Package
+        shell: bash
+        run: |
+          name=piedpiper-${GITHUB_REF_NAME}-${{ matrix.target }}
+          mkdir -p "$name/lib" "$name/include"
+          d=target/${{ matrix.target }}/release
+          cp "$d"/piedpiper{,.exe} "$name/" 2>/dev/null || true
+          cp "$d"/{libpiedpiper.so,libpiedpiper.dylib,libpiedpiper.a,piedpiper.dll,piedpiper.dll.lib,piedpiper.lib} "$name/lib/" 2>/dev/null || true
+          cp crates/capi/include/piedpiper.h "$name/include/"
+          cp README.md "$name/"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: piedpiper-*.*
+
+  wheels:
+    name: wheels (${{ matrix.os }} ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64 }
+          - { os: macos-latest, target: universal2-apple-darwin }
+          - { os: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          target: ${{ matrix.target }}
+          args: --release -o dist
+          manylinux: auto
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: bindings/python/dist/*.whl
+
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python3 bindings/js/build.py
+      - run: node bindings/js/test/golden.mjs
+      - run: npm pack
+        working-directory: bindings/js
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: bindings/js/piedpiper-*.tgz
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "ndk;28.2.13676358"
+      - env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/28.2.13676358
+        run: bash bindings/android/build-native.sh
+      - working-directory: bindings/android
+        run: ./gradlew --no-daemon :piedpiper:assembleRelease :app:assembleRelease
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bindings/android/piedpiper/build/outputs/aar/*.aar
+            bindings/android/app/build/outputs/apk/release/*.apk

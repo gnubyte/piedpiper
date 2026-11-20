@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Core tests + CLI + the cross-platform golden check on every desktop OS / CPU.
+  native:
+    name: native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13, windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p piedpiper --release
+      - run: cargo build --release -p piedpiper-cli -p piedpiper-capi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Golden vectors (CLI)
+        run: python scripts/check_golden.py
+      - name: Golden vectors (C ABI via ctypes)
+        run: python crates/capi/tests/capi_golden.py
+      - name: Thread-count invariance
+        shell: bash
+        run: |
+          EXE=target/release/piedpiper
+          python -c "import sys; sys.stdout.buffer.write(b'determinism ' * 4000)" > in.txt
+          $EXE -q -1 -t 1 -c in.txt > a.pp
+          $EXE -q -1 -t 3 -c in.txt > b.pp
+          cmp a.pp b.pp
+
+  # Without the `parallel` feature (as used by WebAssembly) on a big-endian-free 32-bit target.
+  no-parallel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+      - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      - run: cargo test -p piedpiper --release --no-default-features --target i686-unknown-linux-gnu
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python3 bindings/js/build.py
+      - run: node bindings/js/test/golden.mjs
+
+  python:
+    name: python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin
+      - name: Build wheel
+        working-directory: bindings/python
+        run: maturin build --release -o dist
+      - name: Test
+        shell: bash
+        working-directory: bindings/python
+        run: |
+          pip install dist/*.whl
+          python -m unittest discover -s tests -v
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;28.2.13676358"
+      - name: Native libraries
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/28.2.13676358
+        run: bash bindings/android/build-native.sh
+      - name: Library + demo app
+        working-directory: bindings/android
+        run: ./gradlew --no-daemon :piedpiper:assembleRelease :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            bindings/android/piedpiper/build/outputs/aar/*.aar
+            bindings/android/app/build/outputs/apk/debug/*.apk
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - run: cargo build -p piedpiper -p piedpiper-cli -p piedpiper-capi
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo clippy -p piedpiper -p piedpiper-cli -- -D warnings -A clippy::needless_range_loop -A clippy::too_many_arguments

@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/media",
+    "crates/cli",
+    "crates/capi",
+    "crates/jni",
+    "crates/wasm",
+    "bindings/python",
+    "crates/cabac-shim",
+]
+default-members = ["crates/core", "crates/cli"]
+# Vendored third-party code is a plain dependency, not a workspace member.
+exclude = ["third_party/lepton_jpeg"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.89"
+repository = "https://github.com/gnubyte/piedpiper"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Tests exercise the model numerically; unoptimised builds are far too slow for that.
+[profile.test]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# preflate-rs (deflate recompression) depends on the LGPL-3.0 `cabac` crate. PiedPiper links
+# statically into every SDK, so the workspace swaps in its own MIT implementation of the few
+# `cabac` APIs preflate-rs calls (crates/cabac-shim). Nothing LGPL ends up in a binary.
+[patch.crates-io]
+cabac = { path = "crates/cabac-shim" }

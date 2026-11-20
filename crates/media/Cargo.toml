@@ -1,0 +1,16 @@
+[package]
+name = "piedpiper-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Lossless recompression of H.264 and HEVC (CABAC) and VP9 video in MP4 and Matroska files, for PiedPiper"
+publish = false
+
+[dependencies]
+
+[[bin]]
+name = "ppmedia"
+path = "src/main.rs"
+

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  PiedPiper for Windows: the right-click commands in File Explorer, as an MSI.
+
+  Built by build-msi.ps1 with WiX Toolset v5 (`wix build`), which passes these variables:
+    Version      x.y.z product version
+    ExePath      the built piedpiper-archiver.exe
+    RepoRoot     repository root (license and notice files)
+    AppDir       apps\desktop (its THIRD_PARTY_LICENSES.md covers every crate in the program)
+    ResourceDir  apps\desktop\resources\windows (icons)
+    LicenseRtf   the MIT license as RTF, for the installer's license page
+
+  The HKCR values below must stay identical to `ppdesktop::explorer::values("[#ArchiverExe]")`;
+  the unit test `explorer::tests::installer_matches_registration` compares them. HKCR means
+  HKLM\Software\Classes for this per-machine package.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="PiedPiper"
+           Manufacturer="The PiedPiper authors"
+           Version="$(var.Version)"
+           UpgradeCode="F28D190E-AFEC-4796-9D67-45FFDFFE41E3"
+           Scope="perMachine"
+           Compressed="yes">
+    <SummaryInformation Description="PiedPiper: neural lossless compression from File Explorer" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of PiedPiper is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="PiedPiperIcon" SourceFile="$(var.ResourceDir)\piedpiper.ico" />
+    <Property Id="ARPPRODUCTICON" Value="PiedPiperIcon" />
+    <Property Id="ARPCOMMENTS" Value="Right-click Compress and Extract for File Explorer" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="PiedPiper" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="Program" Directory="INSTALLFOLDER">
+      <Component Id="ArchiverExe">
+        <File Id="ArchiverExe" Source="$(var.ExePath)" KeyPath="yes" />
+      </Component>
+
+      <Component Id="Notices">
+        <File Id="License" Source="$(var.RepoRoot)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+        <File Id="ThirdPartyNotices" Source="$(var.RepoRoot)\THIRD_PARTY_NOTICES.md" />
+        <File Id="ThirdPartyLicenses" Source="$(var.AppDir)\THIRD_PARTY_LICENSES.md" />
+        <File Id="LeptonLicense" Source="$(var.RepoRoot)\third_party\lepton_jpeg\LICENSE.txt" Name="LICENSE-lepton_jpeg.txt" />
+        <File Id="LeptonNotice" Source="$(var.RepoRoot)\third_party\lepton_jpeg\NOTICE.txt" Name="NOTICE-lepton_jpeg.txt" />
+      </Component>
+
+      <Component Id="ExplorerIntegration">
+        <!-- COM classes Explorer starts for the DropTarget verbs. -->
+        <RegistryValue Root="HKCR" Key="CLSID\{27A4092B-ED3D-4569-9C13-DF2ED29481D9}" Type="string" Value="PiedPiper Compress" KeyPath="yes" />
+        <RegistryValue Root="HKCR" Key="CLSID\{27A4092B-ED3D-4569-9C13-DF2ED29481D9}\LocalServer32" Type="string" Value="&quot;[#ArchiverExe]&quot; --com compress" />
+        <RegistryValue Root="HKCR" Key="CLSID\{58FBBC3B-004A-4BD4-9932-577D0D2CF1C7}" Type="string" Value="PiedPiper Extract Here" />
+        <RegistryValue Root="HKCR" Key="CLSID\{58FBBC3B-004A-4BD4-9932-577D0D2CF1C7}\LocalServer32" Type="string" Value="&quot;[#ArchiverExe]&quot; --com extract-here" />
+        <RegistryValue Root="HKCR" Key="CLSID\{3298D9A7-1F73-4CB7-88D9-BD7515A43736}" Type="string" Value="PiedPiper Extract To Folder" />
+        <RegistryValue Root="HKCR" Key="CLSID\{3298D9A7-1F73-4CB7-88D9-BD7515A43736}\LocalServer32" Type="string" Value="&quot;[#ArchiverExe]&quot; --com extract-to" />
+
+        <!-- Compress: files and folders, also mixed selections of any size. -->
+        <RegistryValue Root="HKCR" Key="AllFilesystemObjects\shell\PiedPiper.Compress" Name="MUIVerb" Type="string" Value="Compress with PiedPiper" />
+        <RegistryValue Root="HKCR" Key="AllFilesystemObjects\shell\PiedPiper.Compress" Name="Icon" Type="string" Value="[#ArchiverExe],0" />
+        <RegistryValue Root="HKCR" Key="AllFilesystemObjects\shell\PiedPiper.Compress" Name="MultiSelectModel" Type="string" Value="Player" />
+        <RegistryValue Root="HKCR" Key="AllFilesystemObjects\shell\PiedPiper.Compress\DropTarget" Name="CLSID" Type="string" Value="{27A4092B-ED3D-4569-9C13-DF2ED29481D9}" />
+
+        <!-- Extract here / to folder: on every .pp file, whichever program opens it. -->
+        <RegistryValue Root="HKCR" Key="SystemFileAssociations\.pp\shell\PiedPiper.ExtractHere" Name="MUIVerb" Type="string" Value="Extract here with PiedPiper" />
+        <RegistryValue Root="HKCR" Key="SystemFileAssociations\.pp\shell\PiedPiper.ExtractHere" Name="Icon" Type="string" Value="[#ArchiverExe],1" />
+        <RegistryValue Root="HKCR" Key="SystemFileAssociations\.pp\shell\PiedPiper.ExtractHere" Name="MultiSelectModel" Type="string" Value="Player" />
+        <RegistryValue Root="HKCR" Key="SystemFileAssociations\.pp\shell\PiedPiper.ExtractHere\DropTarget" Name="CLSID" Type="string" Value="{58FBBC3B-004A-4BD4-9932-577D0D2CF1C7}" />
+        <RegistryValue Root="HKCR" Key="SystemFileAssociations\.pp\shell\PiedPiper.ExtractTo" Name="MUIVerb" Type="string" Value="Extract to folder with PiedPiper" />
+        <RegistryValue Root="HKCR" Key="SystemFileAssociations\.pp\shell\PiedPiper.ExtractTo" Name="Icon" Type="string" Value="[#ArchiverExe],1" />
+        <RegistryValue Root="HKCR" Key="SystemFileAssociations\.pp\shell\PiedPiper.ExtractTo" Name="MultiSelectModel" Type="string" Value="Player" />
+        <RegistryValue Root="HKCR" Key="SystemFileAssociations\.pp\shell\PiedPiper.ExtractTo\DropTarget" Name="CLSID" Type="string" Value="{3298D9A7-1F73-4CB7-88D9-BD7515A43736}" />
+
+        <!-- The .pp file type: icon, name, and double-click = Extract. -->
+        <RegistryValue Root="HKCR" Key=".pp" Type="string" Value="PiedPiper.Archive" />
+        <RegistryValue Root="HKCR" Key=".pp" Name="Content Type" Type="string" Value="application/x-piedpiper" />
+        <RegistryValue Root="HKCR" Key=".pp" Name="PerceivedType" Type="string" Value="compressed" />
+        <RegistryValue Root="HKCR" Key="PiedPiper.Archive" Type="string" Value="PiedPiper archive" />
+        <RegistryValue Root="HKCR" Key="PiedPiper.Archive" Name="FriendlyTypeName" Type="string" Value="PiedPiper archive" />
+        <RegistryValue Root="HKCR" Key="PiedPiper.Archive\DefaultIcon" Type="string" Value="[#ArchiverExe],1" />
+        <RegistryValue Root="HKCR" Key="PiedPiper.Archive\shell" Type="string" Value="open" />
+        <RegistryValue Root="HKCR" Key="PiedPiper.Archive\shell\open" Name="MUIVerb" Type="string" Value="Extract" />
+        <RegistryValue Root="HKCR" Key="PiedPiper.Archive\shell\open\command" Type="string" Value="&quot;[#ArchiverExe]&quot; extract &quot;%1&quot;" />
+      </Component>
+      <!-- Start menu: opens the settings window (compression level). The HKCU value is only the
+           component's key path, as WiX documents for non-advertised shortcuts. -->
+      <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder">
+        <Shortcut Id="StartMenuShortcut" Name="PiedPiper" Target="[#ArchiverExe]"
+                  Description="Compression level for PiedPiper's File Explorer commands"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\PiedPiper" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Tell Explorer that file types changed, so .pp files get their icon right away. -->
+    <CustomAction Id="RefreshShell" FileRef="ArchiverExe" ExeCommand="refresh-shell" Execute="immediate" Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <Custom Action="RefreshShell" After="InstallFinalize" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+
+    <Feature Id="Main" Title="PiedPiper" Description="The File Explorer commands and the .pp file type." AllowAbsent="no">
+      <ComponentGroupRef Id="Program" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+  </Package>
+</Wix>

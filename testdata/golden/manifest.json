@@ -1,0 +1,172 @@
+[
+  {
+    "name": "text-bytes",
+    "input": "text-bytes.bin",
+    "compressed": "text-bytes.bin.pp",
+    "flags": "--d-model 32 --layers 2 --heads 2 --d-ff 64 --window 32 --seg 4 --streams 3 -T bytes",
+    "input_sha256": "2814fbe824311b3241224712a368a5f1ea6e06de2af9abc62913018a96e12e56",
+    "compressed_sha256": "1c4cd9b372ab5da0dfc2c0be42d852b8bcab5e51c97802a4c0830736e5c94c1f",
+    "input_size": 24000,
+    "compressed_size": 4606
+  },
+  {
+    "name": "text-bpe",
+    "input": "text-bpe.bin",
+    "compressed": "text-bpe.bin.pp",
+    "flags": "--d-model 48 --layers 2 --heads 4 --d-ff 96 --window 48 --seg 8 --streams 5 -T bpe:600 --beta1 0.9 --clip 1.0",
+    "input_sha256": "0f8032349a9408f7af6bd060ad541b86b88d1a09b7f5132cbe276256c19f0e44",
+    "compressed_sha256": "a7ea5bb6d4df2cee8b74b3598b470b1670e3fa33013ae861ffa415b6f85dec46",
+    "input_size": 40000,
+    "compressed_size": 6256
+  },
+  {
+    "name": "binary",
+    "input": "binary.bin",
+    "compressed": "binary.bin.pp",
+    "flags": "--d-model 32 --layers 1 --heads 2 --d-ff 48 --window 20 --seg 6 --streams 2 -T bytes --lr 3e-3",
+    "input_sha256": "d174b7485045ff1733c39d8c3c9385c07013067e94dbe0bcc0dc8efa77cd77a1",
+    "compressed_sha256": "ccc9d704a807f30ead7cf4f6cd0fc14e7fa0a3a1a1225c48d4ab7b5569509114",
+    "input_size": 16000,
+    "compressed_size": 7912
+  },
+  {
+    "name": "text-prior-s",
+    "input": "text-prior-s.bin",
+    "compressed": "text-prior-s.bin.pp",
+    "flags": "-1",
+    "input_sha256": "42416b76253b8ff8199e5fd6b6ccb557b12042e8ab6d637f89919fb6beb27654",
+    "compressed_sha256": "22be887cef41ab85d38f21651349b99cbb4c8b19731c9e6f36084a19cda73d7f",
+    "input_size": 12000,
+    "compressed_size": 1615
+  },
+  {
+    "name": "text-prior-m",
+    "input": "text-prior-m.bin",
+    "compressed": "text-prior-m.bin.pp",
+    "flags": "-2",
+    "input_sha256": "228aff1f17a7845959bb670d6d6a4b9263fc977d6113211458c08f4175ce3c90",
+    "compressed_sha256": "696028f1c83e1eb9d73ed7a2c104316eb415ca439c27db0ebb1940b90e07670a",
+    "input_size": 6000,
+    "compressed_size": 920
+  },
+  {
+    "name": "text-prior-l",
+    "input": "text-prior-l.bin",
+    "compressed": "text-prior-l.bin.pp",
+    "flags": "-3",
+    "input_sha256": "de81a562ee691bfb6e03b6fd03f7732445debb8650635f082998acd839cd8911",
+    "compressed_sha256": "f012e50ac4e4ac13afd9845bb00af72936dbc2d718b3de27f080af2312bd4e67",
+    "input_size": 4000,
+    "compressed_size": 727
+  },
+  {
+    "name": "text-prior-trial",
+    "input": "text-prior-trial.bin",
+    "compressed": "text-prior-trial.bin.pp",
+    "flags": "-1",
+    "input_sha256": "ea5f1bc8c802ad593726c6d93ff41c9dbfd220c672244f017dbfb760eeef6d2b",
+    "compressed_sha256": "daf2c1d736a4fa1c0f05a8c8feecaff786aa60972d5429dfbf7d1a4309161fcb",
+    "input_size": 12000,
+    "compressed_size": 4498
+  },
+  {
+    "name": "exe-x86",
+    "input": "exe-x86.bin",
+    "compressed": "exe-x86.bin.pp",
+    "flags": "-1",
+    "input_sha256": "ae428f5c6aaea03ded14774ee90ae2085365f8c343c38a26e57efa562e4659c3",
+    "compressed_sha256": "90996624973c9f7aaf6cb42607ed867915936da0baa3c1f89dea79cbdcd5d348",
+    "input_size": 12000,
+    "compressed_size": 1167
+  },
+  {
+    "name": "h264-mp4",
+    "input": "h264-mp4.bin",
+    "compressed": "h264-mp4.bin.pp",
+    "flags": "",
+    "input_sha256": "123852659c8d7d845380297aa1817f4b0a131f05da663e4f37d9970045653241",
+    "compressed_sha256": "f5c8edd1524142551d49a14e1b7956d2261ba75e3722cf99ce2d39d744b1c151",
+    "input_size": 18758,
+    "compressed_size": 13337
+  },
+  {
+    "name": "h264-cavlc-mp4",
+    "input": "h264-cavlc-mp4.bin",
+    "compressed": "h264-cavlc-mp4.bin.pp",
+    "flags": "",
+    "input_sha256": "1251df06de48930347a7515a7aed68eb26cad05751cbc8f952ee87ba7de100e5",
+    "compressed_sha256": "cbac87e3c0c159bd8a69844af7531d2b759849a8de99ccd3cfbd4dc629e8e16a",
+    "input_size": 32742,
+    "compressed_size": 29873
+  },
+  {
+    "name": "hevc-mp4",
+    "input": "hevc-mp4.bin",
+    "compressed": "hevc-mp4.bin.pp",
+    "flags": "",
+    "input_sha256": "39fbb43d596747d2d22c738ce8bc03890262c301a97c83fdda708b0ba2888672",
+    "compressed_sha256": "c6bf3cf42a296fd0ec686174f133306387d14a21162e947e660ca9f61dedba4e",
+    "input_size": 6015,
+    "compressed_size": 4163
+  },
+  {
+    "name": "vp9-webm",
+    "input": "vp9-webm.bin",
+    "compressed": "vp9-webm.bin.pp",
+    "flags": "",
+    "input_sha256": "b4ded946e612f1dab80d966c0598f0fe44333466755c9bc966485e6b67dd32c3",
+    "compressed_sha256": "5b992732ffbbd2c257b35b0ba281f054b76582a2f5b6d1cc526009cb0dddd358",
+    "input_size": 3615,
+    "compressed_size": 2336
+  },
+  {
+    "name": "vp8-webm",
+    "input": "vp8-webm.bin",
+    "compressed": "vp8-webm.bin.pp",
+    "flags": "",
+    "input_sha256": "b9d8ce5bc8592e7339c10a16d1f8a5b64bf6e7424bfad86e3ea2ba4f51b3906d",
+    "compressed_sha256": "8eb8b71b7f20ffdb080a72ae00908d442f0bb871695562070b154c42dcd5b746",
+    "input_size": 1800,
+    "compressed_size": 1080
+  },
+  {
+    "name": "mpeg2-mkv",
+    "input": "mpeg2-mkv.bin",
+    "compressed": "mpeg2-mkv.bin.pp",
+    "flags": "",
+    "input_sha256": "a028984f75dc194d06c353274a184f8d1a99d190bd1ce5a6d3a439385a14237e",
+    "compressed_sha256": "35915d4c9d21269bd679fcf15d0c59a9b0d2ea36969c2ba7afb9062d6b13c759",
+    "input_size": 2582,
+    "compressed_size": 1908
+  },
+  {
+    "name": "jpeg",
+    "input": "jpeg.bin",
+    "compressed": "jpeg.bin.pp",
+    "flags": "-2",
+    "input_sha256": "fe21ce27e700f5ec2623a095f0257fdd77f8ff92a7fdd8a2b9129c03edf7668c",
+    "compressed_sha256": "9d8b008bc93c919dcaef8997f66c46b751eee9082e771cfa3a5e1e34f91aa7ba",
+    "input_size": 2686,
+    "compressed_size": 1443
+  },
+  {
+    "name": "ppm-image",
+    "input": "ppm-image.bin",
+    "compressed": "ppm-image.bin.pp",
+    "flags": "-2",
+    "input_sha256": "f21d226b33f7c2aec37833475fc41e77e70beb9bf16ec43b5eee47c1955896ee",
+    "compressed_sha256": "43165a2b9f2003dd35b9d87073cdca93f627a93b98cd6447387dc2c942d2ee7b",
+    "input_size": 18445,
+    "compressed_size": 11412
+  },
+  {
+    "name": "audio-wav",
+    "input": "audio-wav.bin",
+    "compressed": "audio-wav.bin.pp",
+    "flags": "--d-model 32 --layers 1 --heads 2 --d-ff 48 --window 24 --seg 6 --streams 2 --lr 3e-3",
+    "input_sha256": "a924555932e23b868dec7eb99d1066b4b17451c94adcbda9ae6d808b9d2f4391",
+    "compressed_sha256": "18624f524a25b1c96b37ccfba2c8e6d2eb984470f29c340cb13f97642d40eaba",
+    "input_size": 24074,
+    "compressed_size": 9842
+  }
+]

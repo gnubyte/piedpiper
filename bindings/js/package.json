@@ -1,0 +1,39 @@
+{
+  "name": "piedpiper",
+  "version": "0.1.0",
+  "description": "Neural lossless compression (the TufaZip method: an online-learning Transformer + arithmetic coding) in WebAssembly. Bit-identical with the native, Python and Android builds.",
+  "type": "module",
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./worker": "./src/worker.js",
+    "./piedpiper.wasm": "./src/piedpiper.wasm"
+  },
+  "files": [
+    "src/index.js",
+    "src/index.d.ts",
+    "src/worker.js",
+    "src/piedpiper.wasm",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_LICENSES.md",
+    "third_party/lepton_jpeg/LICENSE.txt",
+    "third_party/lepton_jpeg/NOTICE.txt"
+  ],
+  "scripts": {
+    "build": "python build.py",
+    "test": "node test/golden.mjs"
+  },
+  "keywords": ["compression", "neural", "transformer", "arithmetic-coding", "wasm", "lossless", "tufazip"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false
+}
