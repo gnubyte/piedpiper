@@ -1,0 +1,27 @@
+name: Screenshots
+
+# Run by hand (Actions > Screenshots > Run workflow): installs the latest release's Mac app on a
+# GitHub runner and captures its windows for the README. The Windows screenshots come from
+# apps/desktop/examples/menu_screenshot.rs on a real PC.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the latest Mac app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download --repo "${{ github.repository }}" --pattern PiedPiper-macOS.dmg --dir dist
+      - name: Capture the windows
+        run: bash apps/desktop/packaging/macos/screenshots.sh dist/PiedPiper-macOS.dmg shots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-macos
+          path: shots/*.png
