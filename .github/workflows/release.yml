@@ -39,6 +39,11 @@ jobs:
           cp "$d"/{libpiedpiper.so,libpiedpiper.dylib,libpiedpiper.a,piedpiper.dll,piedpiper.dll.lib,piedpiper.lib} "$name/lib/" 2>/dev/null || true
           cp crates/capi/include/piedpiper.h "$name/include/"
           cp README.md "$name/"
+          # License and third-party notices, named as in the MSI and the DMG.
+          cp LICENSE "$name/LICENSE.txt"
+          cp THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md "$name/"
+          cp third_party/lepton_jpeg/LICENSE.txt "$name/LICENSE-lepton_jpeg.txt"
+          cp third_party/lepton_jpeg/NOTICE.txt "$name/NOTICE-lepton_jpeg.txt"
           if [[ "${{ runner.os }}" == "Windows" ]]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
       - uses: softprops/action-gh-release@v2
         with:

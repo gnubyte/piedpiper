@@ -188,15 +188,17 @@ binary distributions together with this file.
 
 ## Where the packages carry these files
 
-The Python wheel, the npm package and the Android library each include [LICENSE](LICENSE)
-(PiedPiper's MIT license), this file, [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and
-lepton_jpeg's `LICENSE.txt` and `NOTICE.txt`:
+Every package (the CLI and C library archives, the Python wheel, the npm package, the Android
+library and the desktop installers) includes [LICENSE](LICENSE) (PiedPiper's MIT license),
+this file, [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and lepton_jpeg's `LICENSE.txt`
+and `NOTICE.txt`:
 
 | Package | Location |
 |---|---|
 | Python wheel | `piedpiper-<version>.dist-info/licenses/` (PEP 639 `license-files`), with lepton_jpeg's files named `LICENSE-lepton_jpeg.txt` and `NOTICE-lepton_jpeg.txt` |
 | npm package | the package root (`package/` in the tarball), in this repository's layout |
 | Android AAR | `META-INF/piedpiper/` in the AAR's `classes.jar` (and so in the APK of every app built with it), in this repository's layout |
+| CLI and C library archives | the archive's top folder, with lepton_jpeg's files named `LICENSE-lepton_jpeg.txt` and `NOTICE-lepton_jpeg.txt` |
 | Windows MSI | the install folder (`C:\Program Files\PiedPiper`), with lepton_jpeg's files named `LICENSE-lepton_jpeg.txt` and `NOTICE-lepton_jpeg.txt` |
 | macOS DMG | `PiedPiper.app/Contents/Resources/Licenses/`, with the same names as the MSI |
 
