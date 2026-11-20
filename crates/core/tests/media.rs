@@ -49,6 +49,18 @@ fn h264_transport_stream_is_recoded_and_roundtrips() {
 }
 
 #[test]
+fn hevc_transport_stream_is_recoded_and_roundtrips() {
+    // 192-byte BDAV packets, as in .m2ts files
+    let file = piedpiper_media::ts::synth::from_hevc_mp4(15, 8, "main", true, true);
+    let packed = compress(&file, &CompressOptions::default()).unwrap();
+    let info = inspect(&packed).unwrap();
+    assert_eq!(info.tokenizer, "hevc-ts-recode");
+    assert!(!info.stored);
+    assert!(packed.len() < file.len(), "{} >= {}", packed.len(), file.len());
+    assert_eq!(decompress(&packed).unwrap(), file);
+}
+
+#[test]
 fn recoding_is_deterministic() {
     let file = sample();
     let a = compress(&file, &CompressOptions::default()).unwrap();

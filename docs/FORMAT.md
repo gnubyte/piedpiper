@@ -336,27 +336,36 @@ recomputes `crc1` (so that the CRC of the first 5/8 of the frame is zero) and `c
 decodes the container bytes around the frames. A stream without AC-3 frames has no runs and
 ends after its last segment, as before.
 
-### H.264 in MPEG transport streams (`PPTS`)
+### H.264 and HEVC in MPEG transport streams (`PPTS`)
 
-For 188-byte-packet transport streams whose first program (PAT) has an H.264 stream (PMT
-stream type `0x1B`). The payload is the magic `PPTS`, the length of a side stream (varint), the
-side stream, and then a complete `PPM3` payload (as above) whose "file" is the stream's NAL
-units, each as a 4-byte big-endian length and the unit, a new sample at each access unit
-delimiter, with no container bytes and no parameter sets outside the samples (in-band SPS
-and PPS work as usual).
+For transport streams of 188-byte packets, or of the 192-byte source packets of BDAV streams
+(`.m2ts`, `.mts`: a 4-byte `TP_extra_header` before each 188-byte packet), whose first program
+(PAT) has an H.264 (PMT stream type `0x1B`) or HEVC (`0x24`) stream; the first of them in the
+PMT is the one recoded. The payload is the magic `PPTS`, the length of a side stream (varint),
+the side stream, and then a complete `PPM3` (H.264) or `PPH3` (HEVC) payload (as above) whose
+"file" is the stream's NAL units, each as a 4-byte big-endian length and the unit, with no
+container bytes and no parameter sets outside the samples (in-band parameter sets work as
+usual). The inner magic says which codec it is. Each sample is an access unit: for H.264 a new
+one starts at each access unit delimiter; for HEVC at an access unit delimiter or, once the
+sample holds a slice, at a parameter set, a prefix SEI or reserved non-VCL unit (types 32-34,
+39, 41-44, 48-55) or a slice with `first_slice_segment_in_pic_flag` (H.265 7.4.2.4.4). The
+sample table is in the inner payload, so the decoder does not repeat this.
 
-The encoder splits the file into the video elementary stream (the payload bytes of the
-H.264 PID's packets after any PES header) and a skeleton (every other byte, in file order:
-packet headers, adaptation fields, PES headers, other PIDs' packets, and any bytes after the
-last whole packet). The side stream, coded with its own model (2^20 slots), holds: the file
-length, the video PID, the skeleton's length and bytes, the bytes of the elementary stream
-before its first start code, the number of NAL units and for each the number of zero bytes
-before its start code beyond the two of `00 00 01`, and the number of zero bytes at the end.
-A unit runs from its start code to the zero bytes in front of the next start code.
+The encoder splits the file into the video elementary stream (the payload bytes of the video
+PID's packets after any PES header), the 4-byte headers of BDAV packets, and a skeleton (every
+other byte, in file order: packet headers, adaptation fields, PES headers, other PIDs' packets,
+and any bytes after the last whole packet). The side stream, coded with its own model (2^20
+slots), holds: the file length, the video PID (plus 8192 for 192-byte packets), the skeleton's
+length and bytes, the bytes of the elementary stream before its first start code, the number of
+NAL units and for each the number of zero bytes before its start code beyond the two of
+`00 00 01`, the number of zero bytes at the end, and for 192-byte packets the first packet's
+header (as a 32-bit big-endian number) and, for each later packet, how much the difference
+between consecutive headers changed (wrapping 32-bit arithmetic, zigzag-coded). A unit runs
+from its start code to the zero bytes in front of the next start code.
 
-The decoder decodes the `PPM3` payload, rebuilds the elementary stream from the units and
-the zero counts, and walks the skeleton packet by packet: a packet's header and adaptation
-field come from the skeleton; for the video PID with a payload, a payload-unit start also
+The decoder decodes the inner payload, rebuilds the elementary stream from the units and the
+zero counts, and walks the skeleton packet by packet: a BDAV packet's 4-byte header comes from
+the decoded headers; a packet's header and adaptation field come from the skeleton; for the video PID with a payload, a payload-unit start also
 takes the PES header (9 bytes plus its header-data length) from the skeleton, and the rest of
 the packet comes from the elementary stream; every other packet comes whole from the skeleton.
 The encoder recodes a file only when this rebuilds it exactly.

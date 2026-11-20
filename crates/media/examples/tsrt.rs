@@ -1,4 +1,5 @@
-//! Development tool: recompresses H.264 transport streams and checks the round trip.
+//! Development tool: recompresses H.264 and HEVC transport streams (`.ts`, `.m2ts`) and checks
+//! the round trip.
 //! `cargo run --release --example tsrt -- FILE...` (`PPM_THREADS=n`, `PPM_NODEC=1`)
 use piedpiper_media::{ts, Options};
 use std::time::Instant;

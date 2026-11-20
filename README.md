@@ -239,7 +239,7 @@ reversible colour + 2-D prediction filter before the model sees them, like WebP 
 On test photos the model then needs 21–31% fewer bytes than for the raw pixels, on par
 with or better than WebP lossless, and PNG pixels 11–34% fewer than the PNG's own scanlines. See [docs/DESIGN.md](docs/DESIGN.md#image-filter).
 
-**Video files** (MP4/MOV/MKV/WebM with H.264 or HEVC, MKV/WebM with VP9 or VP8, MKV with MPEG-2) get the same treatment (format mode 2).
+**Video files** (MP4/MOV/MKV/WebM and MPEG transport streams with H.264 or HEVC, MKV/WebM with VP9 or VP8, MKV with MPEG-2) get the same treatment (format mode 2).
 These codecs already removed nearly all of the redundancy, so byte-level compressors get
 almost nothing: xz and the Transformer measure about 8.0 bits per byte on real clips.
 PiedPiper instead parses each slice (or VP8/VP9 partition) down to its entropy coder's decisions, codes them with a stronger
@@ -262,8 +262,14 @@ context-mixing model, and rebuilds the original bitstream bit for bit on decompr
 | video clips, 1080p (18 files, one 720p) | H.264 Baseline (CAVLC) | 1.83 GB | 2.3%² | **17.3% smaller** (14.6–31.1%) |
 | recordings in fragmented MP4 (3 files) | H.264 High (CABAC), `moof`/`trun` sample tables | 413 MB | 0.1% | **6.7% smaller** (6.2–34.4%) |
 | game capture | H.264 High (CABAC) in an MPEG transport stream | 1.05 GB | 2.6% | **11.1% smaller** (slices 8.1%) |
+| phone video remuxed to `.ts` (2 recordings) | camera footage, HEVC | 883 MB | 0.4% | **9.7% smaller** (7.8% and 11.7%) |
+| remuxed to `.m2ts` (192-byte packets): one of them, and a clip | HEVC; H.264 Baseline (CAVLC) | 513 MB | — | **13.6% and 29.8% smaller** |
 
-The HEVC phone clips come from a Pixel phone. The HEVC trailer was re-encoded with a GPU
+The HEVC phone clips come from a Pixel phone. The `.ts` and `.m2ts` files other than the game
+capture were remuxed from MP4 files with `crates/media/examples/tsmux.rs` (video only, evenly
+spaced BDAV time stamps), so their slices are the original encoders'; the slices shrink about
+as much as in the MP4 files, and the packet and PES headers around them almost vanish.
+The HEVC trailer was re-encoded with a GPU
 encoder that pads to a constant bitrate with filler data (16% of the file), which xz removes
 too; its HEVC slice data alone shrinks 10.9%. On 102 HEVC conformance test streams every slice
 recodes except the few that use PCM blocks. ¹xz -6 on the first 100 MB. ²xz -9e on four of the files (90 MB). The VP9 clips are Windows' display-settings
@@ -288,9 +294,9 @@ VP8 and MPEG-2 gain the most: VP8's entropy coding has the simplest contexts of
 these codecs, and MPEG-2 has no adaptive entropy coder at all, only fixed variable-length
 codes, which the model replaces bit by bit. Baseline H.264 (CAVLC) is coded the same way and
 gains at least as much (17.3% on the 18 files above); it recodes at 2–4 MB/s on 6 threads.
-H.264 in MPEG transport streams (`.ts`, `.mts` and some `.mpg` captures) is split into its
-elementary stream, which is recoded like an MP4 track, and the packet and PES headers around
-it.
+H.264 and HEVC in MPEG transport streams (`.ts`, the 192-byte packets of `.m2ts` and `.mts`, and
+some `.mpg` captures) are split into the elementary stream, which is recoded like an MP4 track,
+and the packet and PES headers around it.
 
 Other compressed video (AV1 in any container, VP8/VP9 in MP4, VP9 with backward probability adaptation, MPEG-1/2 in MPEG-PS/TS or AVI, FLV, HEVC it cannot parse) is
 recognised from its container and a quick randomness check and stored as is in

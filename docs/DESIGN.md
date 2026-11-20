@@ -586,25 +586,33 @@ model returns.
 
 On the rip above the audio shrinks 13.7% and the whole file 18.7%.
 
-### H.264 in MPEG transport streams
+### H.264 and HEVC in MPEG transport streams
 
-Camcorders (AVCHD `.mts`), TV recordings and capture tools write H.264 into MPEG transport
-streams: 188-byte packets with 4-byte headers, some with adaptation fields (timing, padding),
-the video interleaved with audio and tables. The slices are cut across packets, so the slice
-parsers cannot read them in place. `crates/media/src/ts.rs` finds the H.264 stream through the
-program tables (PAT, then a PMT entry of stream type `0x1B`), splits the file into the video's
-elementary stream and a skeleton of everything else (packet headers, adaptation fields, PES
-headers, other streams' packets), and cuts the elementary stream at its start codes into NAL
-units, with a new sample at each access unit delimiter. The units go through the same track
-recoder as an MP4 track (with in-band parameter sets); the skeleton and the zero bytes in
-front of each start code go into a small side stream with its own model. The decoder pours the
+Camcorders (AVCHD `.mts`), Blu-ray discs (`.m2ts`), TV recordings and capture tools write H.264
+or HEVC into MPEG transport streams: 188-byte packets with 4-byte headers (in `.mts` and
+`.m2ts`, 192-byte packets: a 4-byte arrival time stamp before each), some with adaptation
+fields (timing, padding), the video interleaved with audio and tables. The slices are cut
+across packets, so the slice parsers cannot read them in place. `crates/media/src/ts.rs` finds
+the video stream through the program tables (PAT, then a PMT entry of stream type `0x1B` for
+H.264 or `0x24` for HEVC), splits the file into the video's elementary stream and a skeleton of
+everything else (packet headers, adaptation fields, PES headers, other streams' packets), and
+cuts the elementary stream at its start codes into NAL units, one sample per access unit (at
+each delimiter; HEVC access units are also found without delimiters, from the first slice of
+each picture and the parameter sets and SEI in front of it). The units go through the same
+track recoder as an MP4 track (with in-band parameter sets); the skeleton, the zero bytes in
+front of each start code and the arrival time stamps (as changes in their spacing, which is
+nearly constant) go into a small side stream with its own model. The decoder pours the
 rebuilt elementary stream back into the packets, using the packet and PES headers in the
 skeleton to find where each payload goes.
 
 On a 1.05 GB game capture (H.264 High, CABAC) all 79,546 slices were recoded and came out 8.1%
 smaller; the 62 MB around them (packet and PES headers, padding, other streams, other NAL
 units) packed into 25 MB, and the whole file came out 11.1% smaller, where it used to be
-stored as is. xz saves 2.6%.
+stored as is. xz saves 2.6%. Two HEVC phone recordings remuxed into transport streams (video
+only) came out 11.7% and 7.8% smaller, with every slice recoded (slices 9.95% and 6.0%, about
+as in their MP4 files); as 192-byte BDAV packets the first came out 13.6% smaller, its 9 MB of
+arrival time stamps costing a few hundred bytes. Stored as raw skeleton bytes, those stamps had
+cost 6.9 MB.
 
 ## Audio: PCM prediction (format mode 5)
 

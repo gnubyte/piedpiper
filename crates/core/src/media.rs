@@ -24,6 +24,8 @@ pub const NAME_VP8: &str = "vp8-recode";
 pub const NAME_MPEG2: &str = "mpeg2-recode";
 /// Name reported by [`crate::inspect`] for mode-2 streams holding an H.264 transport stream.
 pub const NAME_TS: &str = "h264-ts-recode";
+/// Name reported by [`crate::inspect`] for mode-2 streams holding an HEVC transport stream.
+pub const NAME_TS_HEVC: &str = "hevc-ts-recode";
 
 /// The [`crate::inspect`] name of a mode-2 payload.
 pub fn name(payload: &[u8]) -> &'static str {
@@ -34,12 +36,31 @@ pub fn name(payload: &[u8]) -> &'static str {
     } else if payload.starts_with(b"PPMV") {
         NAME_MPEG2
     } else if payload.starts_with(b"PPTS") {
-        NAME_TS
+        if ts_is_hevc(payload) {
+            NAME_TS_HEVC
+        } else {
+            NAME_TS
+        }
     } else if payload.starts_with(b"PPH3") {
         NAME_HEVC
     } else {
         NAME
     }
+}
+
+/// Whether a `PPTS` payload holds HEVC: the stream after its side stream (whose length is a
+/// varint after the magic) starts with `PPH3`.
+fn ts_is_hevc(payload: &[u8]) -> bool {
+    let mut len = 0u64;
+    for (pos, shift) in (4usize..).zip((0..64).step_by(7)) {
+        let Some(&b) = payload.get(pos) else { return false };
+        len |= ((b & 0x7F) as u64) << shift;
+        if b & 0x80 == 0 {
+            let start = usize::try_from(len).ok().and_then(|n| n.checked_add(pos + 1));
+            return start.and_then(|p| payload.get(p..p.checked_add(4)?)) == Some(&b"PPH3"[..]);
+        }
+    }
+    false
 }
 
 #[cfg(feature = "media")]
@@ -86,7 +107,7 @@ fn unpack(payload: &[u8], progress: &mut piedpiper_media::Progress) -> std::resu
 }
 
 /// Recompresses `input` if it is a video file with an H.264, HEVC, VP9, VP8 or MPEG-2 track (or an H.264
-/// MPEG transport stream) and recompression
+/// or HEVC MPEG transport stream) and recompression
 /// makes it smaller. Returns `Ok(None)` otherwise. The result is decompressed and compared
 /// with the input before it is returned, so a parser bug can only cost compression, never
 /// data.

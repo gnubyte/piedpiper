@@ -406,6 +406,7 @@ fn describe(info: &piedpiper::Info) -> String {
         _ if info.tokenizer == "vp8-recode" => "VP8 video, entropy-coding layer recompressed losslessly".into(),
         _ if info.tokenizer == "mpeg2-recode" => "MPEG-2 video, variable-length codes recompressed losslessly".into(),
         _ if info.tokenizer == "h264-ts-recode" => "H.264 transport stream, CABAC/CAVLC layer recompressed losslessly".into(),
+        _ if info.tokenizer == "hevc-ts-recode" => "HEVC transport stream, CABAC layer recompressed losslessly".into(),
         _ if info.tokenizer == "jpeg-lepton" => "JPEG, DCT coefficients recompressed losslessly (Lepton)".into(),
         _ if info.tokenizer == "deflate-recode" => "deflate streams (PNG/ZIP/gzip/PDF) expanded and recompressed".into(),
         _ if info.tokenizer == "pcm-audio" => "16-bit PCM audio, adaptive prediction residuals coded by the neural model".into(),
