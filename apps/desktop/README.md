@@ -84,7 +84,7 @@ replaces the LGPL `cabac` crate with [`crates/cabac-shim`](../../crates/cabac-sh
 ```powershell
 dotnet tool install --global wix --version 5.0.2
 wix extension add -g WixToolset.UI.wixext/5.0.2
-pwsh apps/desktop/packaging/windows/build-msi.ps1 -Version 0.1.2    # -> dist/PiedPiper-Windows-x64.msi
+pwsh apps/desktop/packaging/windows/build-msi.ps1 -Version 0.1.3    # -> dist/PiedPiper-Windows-x64.msi
 ```
 
 WiX 5 is pinned on purpose: WiX 6 and later refuse to build until the Open Source Maintenance
@@ -94,7 +94,7 @@ Fee EULA is accepted. The x64 MSI also runs on Windows on ARM.
 
 ```bash
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
-bash apps/desktop/packaging/macos/build-dmg.sh 0.1.2                # -> dist/PiedPiper-macOS.dmg
+bash apps/desktop/packaging/macos/build-dmg.sh 0.1.3                # -> dist/PiedPiper-macOS.dmg
 ```
 
 After changing dependencies, regenerate the license texts that both installers ship:

@@ -1,6 +1,6 @@
 {
   "name": "piedpiper",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Neural lossless compression (the TufaZip method: an online-learning Transformer + arithmetic coding) in WebAssembly. Bit-identical with the native, Python and Android builds.",
   "type": "module",
   "main": "./src/index.js",

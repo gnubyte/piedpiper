@@ -12,8 +12,8 @@ android {
         applicationId = "io.piedpiper.demo"
         minSdk = 24
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.1.2"
+        versionCode = 3
+        versionName = "0.1.3"
     }
 
     buildTypes {
