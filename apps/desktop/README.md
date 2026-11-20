@@ -80,7 +80,7 @@ replaces the LGPL `cabac` crate with [`crates/cabac-shim`](../../crates/cabac-sh
 ```powershell
 dotnet tool install --global wix --version 5.0.2
 wix extension add -g WixToolset.UI.wixext/5.0.2
-pwsh apps/desktop/packaging/windows/build-msi.ps1 -Version 0.1.0    # -> dist/PiedPiper-0.1.0-x64.msi
+pwsh apps/desktop/packaging/windows/build-msi.ps1 -Version 0.1.2    # -> dist/PiedPiper-Windows-x64.msi
 ```
 
 WiX 5 is pinned on purpose: WiX 6 and later refuse to build until the Open Source Maintenance
@@ -90,7 +90,7 @@ Fee EULA is accepted. The x64 MSI also runs on Windows on ARM.
 
 ```bash
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
-bash apps/desktop/packaging/macos/build-dmg.sh 0.1.0                # -> dist/PiedPiper-0.1.0-macos.dmg
+bash apps/desktop/packaging/macos/build-dmg.sh 0.1.2                # -> dist/PiedPiper-macOS.dmg
 ```
 
 After changing dependencies, regenerate the license texts that both installers ship:
@@ -100,8 +100,17 @@ After changing dependencies, regenerate the license texts that both installers s
 
 [`.github/workflows/desktop.yml`](../../.github/workflows/desktop.yml) runs on pushes and pull
 requests that touch the app or the core. It tests on both systems, builds the MSI and the DMG,
-installs them, checks them, and uploads both as workflow artifacts. Pushing a `v*` tag also
-attaches them to that GitHub release, next to what `release.yml` publishes.
+installs them, checks them, and uploads both as workflow artifacts.
+
+To release, bump the version in all five files (`python scripts/check_version.py` lists
+them) and push a `vX.Y.Z` tag. `release.yml` refuses a tag that doesn't match the packages,
+creates the release as a pre-release with the download notes from
+[`.github/release-notes.md`](../../.github/release-notes.md), and attaches the command-line
+tool, the libraries and the packages. This workflow attaches `PiedPiper-Windows-x64.msi`
+and `PiedPiper-macOS.dmg`. Once both have passed the tests below, it marks the release as
+the latest. The installers keep those names in every release, so
+`https://github.com/gnubyte/piedpiper/releases/latest/download/PiedPiper-Windows-x64.msi`
+(and `.../PiedPiper-macOS.dmg`) always downloads the newest tested build.
 
 The Windows job installs the MSI, runs the installed program, drives the Explorer verbs through
 the shell's own `IContextMenu` (21 selected items, then Extract to folder), and uninstalls. The

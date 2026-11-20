@@ -92,10 +92,13 @@ jobs:
           name: PiedPiper-windows
           path: dist/*.msi
 
-      - uses: softprops/action-gh-release@v2
+      - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          files: dist/*.msi
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: shopt -s nullglob; bash scripts/release.sh upload "$GITHUB_REF_NAME" dist/*.msi
 
   macos:
     name: macOS DMG
@@ -159,7 +162,25 @@ jobs:
           name: PiedPiper-macos
           path: dist/*.dmg
 
-      - uses: softprops/action-gh-release@v2
+      - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          files: dist/*.dmg
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: shopt -s nullglob; bash scripts/release.sh upload "$GITHUB_REF_NAME" dist/*.dmg
+
+  # Both installers passed their end-to-end tests and are attached: make this the latest release,
+  # so the README's releases/latest/download/... links get them.
+  publish:
+    name: Publish the release
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mark as the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/release.sh publish "$GITHUB_REF_NAME"

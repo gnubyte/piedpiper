@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Builds PiedPiper's Windows installer: dist\PiedPiper-<version>-x64.msi.
+    Builds PiedPiper's Windows installer: dist\PiedPiper-Windows-x64.msi.
 
 .DESCRIPTION
     Compiles piedpiper-archiver.exe (release), optionally signs it, and packs it with WiX
@@ -75,7 +75,8 @@ $licenseRtf = Join-Path $work "License.rtf"
 Set-Content -Path $licenseRtf -Value $rtf -Encoding ascii
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-$msi = Join-Path (Resolve-Path $OutDir).Path "PiedPiper-$msiVersion-$arch.msi"
+# A fixed name, so releases/latest/download/PiedPiper-Windows-x64.msi always gets the newest.
+$msi = Join-Path (Resolve-Path $OutDir).Path "PiedPiper-Windows-$arch.msi"
 wix build (Join-Path $here "PiedPiper.wxs") -arch $arch -ext WixToolset.UI.wixext `
     -d "Version=$msiVersion" -d "ExePath=$exe" -d "RepoRoot=$repo" -d "AppDir=$app" `
     -d "ResourceDir=$(Join-Path $app 'resources\windows')" -d "LicenseRtf=$licenseRtf" `

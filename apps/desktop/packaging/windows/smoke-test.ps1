@@ -12,7 +12,7 @@
     -Stage Uninstall  uninstall silently and check that the registration is gone
 
 .EXAMPLE
-    pwsh smoke-test.ps1 -Stage Install -Msi dist\PiedPiper-0.1.0-x64.msi
+    pwsh smoke-test.ps1 -Stage Install -Msi dist\PiedPiper-Windows-x64.msi
 #>
 param(
     [Parameter(Mandatory)][ValidateSet("Install", "Explorer", "Uninstall")][string]$Stage,

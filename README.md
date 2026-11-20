@@ -9,6 +9,24 @@ PiedPiper re-engineers the method to run on ordinary CPUs and to be **bit-exact
 everywhere**. A file compressed on a Windows laptop decompresses on a Linux server, an
 Android phone, in Python, or in a browser.
 
+## Download
+
+| Your computer | Download |
+|---|---|
+| **Windows 10 or 11** | **[PiedPiper-Windows-x64.msi](https://github.com/gnubyte/piedpiper/releases/latest/download/PiedPiper-Windows-x64.msi)** |
+| **Mac** (macOS 11 or later, Apple Silicon or Intel) | **[PiedPiper-macOS.dmg](https://github.com/gnubyte/piedpiper/releases/latest/download/PiedPiper-macOS.dmg)** |
+
+Install it, then right-click any files or folders and choose **Compress with PiedPiper**:
+everything you selected goes into one `.pp` archive. Double-click a `.pp` archive to extract
+it, or right-click it for **Extract here** and **Extract to folder**. On Windows 11 the
+commands are under **Show more options**; on a Mac, Control-click and look under **Quick
+Actions** or **Services**. The builds aren't code-signed yet, so Windows SmartScreen (**More
+info → Run anyway**) or macOS (**System Settings → Privacy & Security → Open Anyway**) asks
+once on first launch.
+
+The [releases page](https://github.com/gnubyte/piedpiper/releases/latest) also has the
+command-line tool, the C library, and the Python, npm and Android packages.
+
 | Platform | Package | Where |
 |---|---|---|
 | Windows, Linux, macOS (x86-64 & ARM64) | `piedpiper` command-line tool | [`crates/cli`](crates/cli) |

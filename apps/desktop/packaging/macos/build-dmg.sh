@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds PiedPiper.app and packs it into dist/PiedPiper-<version>-macos.dmg, with an
+# Builds PiedPiper.app and packs it into dist/PiedPiper-macOS.dmg, with an
 # Applications shortcut to drag it onto.
 #
 #   bash apps/desktop/packaging/macos/build-dmg.sh [VERSION]
@@ -19,13 +19,13 @@ if [ -z "$version" ]; then
   version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$app_dir/Cargo.toml" | head -1)"
 fi
 version="${version#v}"
-short="${version%%[-+]*}"
 
 bash "$here/build-app.sh" "$version"
 
 out_dir="${OUT_DIR:-$repo/dist}"
 mkdir -p "$out_dir"
-dmg="$out_dir/PiedPiper-$short-macos.dmg"
+# A fixed name, so releases/latest/download/PiedPiper-macOS.dmg always gets the newest.
+dmg="$out_dir/PiedPiper-macOS.dmg"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 cp -R "$app_dir/target/macos/PiedPiper.app" "$stage/"

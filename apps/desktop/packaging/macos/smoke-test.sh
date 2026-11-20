@@ -3,8 +3,8 @@
 # and (stage "services") installs the app and runs its Finder services the way the Finder does.
 # Meant for CI; the services stage copies the app into /Applications.
 #
-#   bash smoke-test.sh app dist/PiedPiper-0.1.0-macos.dmg
-#   bash smoke-test.sh services dist/PiedPiper-0.1.0-macos.dmg
+#   bash smoke-test.sh app dist/PiedPiper-macOS.dmg
+#   bash smoke-test.sh services dist/PiedPiper-macOS.dmg
 set -euo pipefail
 
 stage="$1"
