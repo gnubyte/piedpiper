@@ -2,7 +2,8 @@
 
 ## The method (TufaZip)
 
-[TufaZip](https://tufalabs.ai/research/tufazip/) (Tufa Labs, 2026) placed #2 on Matt
+[TufaZip](https://tufalabs.ai/research/tufazip/), by [Tommy He](https://x.com/tommyhe41) at
+[Tufa Labs](https://tufalabs.ai/) (2026), placed #2 on Matt
 Mahoney's Large Text Compression Benchmark with a single predictor: a decoder-only
 Transformer that **trains online while it compresses**.
 

@@ -1,9 +1,10 @@
 # PiedPiper
 
 **Neural lossless compression for every platform**, using the
-[TufaZip](https://tufalabs.ai/research/tufazip/) method. A Transformer learns your data
-*while* it compresses it and drives an arithmetic coder. The decoder re-learns the same
-weights as it decodes, so the model is never stored.
+[TufaZip](https://tufalabs.ai/research/tufazip/) method by
+[Tommy He](https://x.com/tommyhe41) at [Tufa Labs](https://tufalabs.ai/). A Transformer
+learns your data *while* it compresses it and drives an arithmetic coder. The decoder
+re-learns the same weights as it decodes, so the model is never stored.
 
 PiedPiper re-engineers the method to run on ordinary CPUs and to be **bit-exact
 everywhere**. A file compressed on a Windows laptop decompresses on a Linux server, an
@@ -23,6 +24,23 @@ commands are under **Show more options**; on a Mac, Control-click and look under
 Actions** or **Services**. The builds aren't code-signed yet, so Windows SmartScreen (**More
 info → Run anyway**) or macOS (**System Settings → Privacy & Security → Open Anyway**) asks
 once on first launch.
+
+### Screenshots
+
+| Right-click any files or folders | Right-click a `.pp` archive |
+|:---:|:---:|
+| <img src="docs/images/windows-menu-compress.png" width="300" alt="File Explorer's right-click menu for three selected files, with Compress with PiedPiper at the top"> | <img src="docs/images/windows-menu-extract.png" width="300" alt="File Explorer's right-click menu for a .pp archive, with Extract here with PiedPiper and Extract to folder with PiedPiper"> |
+
+| Windows: progress, time left and Cancel | Mac: progress, time left and Cancel |
+|:---:|:---:|
+| <img src="docs/images/windows-progress.png" width="420" alt="Windows progress dialog compressing a text file, about 1 minute and 30 seconds remaining"> | <img src="docs/images/macos-progress.png" width="420" alt="Mac progress window compressing a text file, about 3 minutes left"> |
+
+| Windows: Start menu → PiedPiper | Mac: opening the app |
+|:---:|:---:|
+| <img src="docs/images/windows-settings.png" width="380" alt="Windows settings dialog explaining the commands, with the compression level choices"> | <img src="docs/images/macos-settings.png" width="260" alt="Mac window explaining the Finder commands, with the compression level menu"> |
+
+The menus are Windows 11's full right-click menu (**Show more options**); Windows 10 shows
+them directly.
 
 The [releases page](https://github.com/gnubyte/piedpiper/releases/latest) also has the
 command-line tool, the C library, and the Python, npm and Android packages.
@@ -330,9 +348,20 @@ pwsh apps/desktop/packaging/windows/build-msi.ps1     # Windows installer (needs
 bash apps/desktop/packaging/macos/build-dmg.sh        # macOS app -> dist/*.dmg
 ```
 
+## Credits
+
+The method PiedPiper implements is **TufaZip**, created by
+**[Tommy He](https://x.com/tommyhe41)** at **[Tufa Labs](https://tufalabs.ai/)** and
+described in [tufazip: Learning to Compress a Billion Bytes of
+Wikipedia](https://tufalabs.ai/research/tufazip/) (October 2026). PiedPiper follows its
+design: a Transformer that learns the data while it codes it, TufaZip v2's block layout, a
+word-level vocabulary learned from the input, and offline-trained priors. Credit and thanks
+to Tommy He and Tufa Labs.
+
 ## Relation to TufaZip
 
-PiedPiper implements the published method; it is not affiliated with Tufa Labs. The
+PiedPiper is an independent implementation of the published method; it is not affiliated
+with Tufa Labs. The
 original is a benchmark entry: 163M parameters, two B200 GPUs, about a week per gigabyte,
 and decodable only on the identical CUDA software stack. PiedPiper uses much smaller
 networks to stay practical on phones and in browsers, and it cannot read TufaZip's own

@@ -24,3 +24,5 @@ These builds aren't code-signed yet, so the first launch asks you to confirm. On
 | `piedpiper-release.aar`, `app-release.apk` | Android library and demo app |
 
 Files compressed by any of them open in all the others, on every platform.
+
+PiedPiper implements [TufaZip](https://tufalabs.ai/research/tufazip/), the method created by [Tommy He](https://x.com/tommyhe41) at [Tufa Labs](https://tufalabs.ai/).

@@ -12,7 +12,11 @@ Right-click compression for File Explorer and the Finder, with PiedPiper as the 
 Every command works on any number of selected items. A progress window shows how far along it
 is and how long is left, and **Cancel** stops it without leaving partial files behind.
 
-![icon](resources/icon-256.png)
+<img src="../../docs/images/windows-menu-compress.png" width="280" alt="File Explorer's right-click menu with Compress with PiedPiper"> <img src="../../docs/images/macos-progress.png" width="420" alt="Mac progress window">
+
+More screenshots are in the main [README](../../README.md#screenshots). To retake them:
+`cargo run --example menu_screenshot -- OUT.bmp FILE...` for File Explorer's menu (after
+`piedpiper-archiver register`), and the hand-run **Screenshots** workflow for the Mac windows.
 
 ## What it makes
 
