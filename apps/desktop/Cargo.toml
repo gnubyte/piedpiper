@@ -49,7 +49,9 @@ objc2 = "0.6.5"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
 
-[target.'cfg(windows)'.build-dependencies]
+# Needed on every host: build.rs is compiled for the host and only calls it when the target is
+# Windows (a Windows-only build dependency broke the build on macOS).
+[build-dependencies]
 embed-resource = "3.0"
 
 # preflate-rs (deflate recompression in the core) depends on the LGPL-3.0 `cabac` crate. As in

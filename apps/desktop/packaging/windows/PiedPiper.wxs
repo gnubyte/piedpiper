@@ -29,7 +29,7 @@
     <Icon Id="PiedPiperIcon" SourceFile="$(var.ResourceDir)\piedpiper.ico" />
     <Property Id="ARPPRODUCTICON" Value="PiedPiperIcon" />
     <Property Id="ARPCOMMENTS" Value="Right-click Compress and Extract for File Explorer" />
-    <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- WixUI_Minimal sets ARPNOMODIFY itself; defining it here too is a duplicate. -->
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="PiedPiper" />
