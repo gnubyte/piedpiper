@@ -30,8 +30,10 @@ LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|UNLICENSE)", re.I)
 
 
 def crates(workspace=ROOT):
+    # --color never: CI sets CARGO_TERM_COLOR=always, which would wrap the " (*)" marker in escape codes.
     out = subprocess.run(["cargo", "tree", "--workspace", "-e", "normal", "--target", "all", "--prefix", "none",
-                          "--format", "{p}|{l}"], cwd=workspace, capture_output=True, text=True, check=True).stdout
+                          "--color", "never", "--format", "{p}|{l}"],
+                         cwd=workspace, capture_output=True, text=True, check=True).stdout
     seen = {}
     for line in out.splitlines():
         line = line.replace(" (*)", "").strip()

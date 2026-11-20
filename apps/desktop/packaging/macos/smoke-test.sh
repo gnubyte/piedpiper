@@ -13,8 +13,16 @@ here="$(cd "$(dirname "$0")" && pwd)"
 work="$(mktemp -d)"
 mnt="$work/mnt"
 mkdir -p "$mnt"
-hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt" >/dev/null
-trap 'hdiutil detach "$mnt" -quiet || true' EXIT
+# Right after the previous stage detached it, the image can still be busy for a moment
+# ("hdiutil: attach failed - Resource busy"), so try a few times.
+for try in 1 2 3 4 5 6; do
+  hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt" >/dev/null && break
+  [ "$try" -lt 6 ] || exit 1
+  echo "attach failed, retrying in 5 s" >&2
+  sleep 5
+done
+detach() { hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet || true; }
+trap detach EXIT
 app="$mnt/PiedPiper.app"
 bin="$app/Contents/MacOS/PiedPiper"
 
@@ -56,7 +64,7 @@ services)
   mkdir -p "$settings"
   printf 'level = 1\nlog = 1\nui = none\n' > "$settings/archiver.ini"
   show_log() { echo "--- archiver.log"; cat "$settings/archiver.log" 2>/dev/null || true; }
-  trap 'show_log; rm -f "$settings/archiver.ini"; hdiutil detach "$mnt" -quiet || true' EXIT
+  trap 'show_log; rm -f "$settings/archiver.ini"; detach' EXIT
 
   mkdir -p "$work/s/folder"
   for i in $(seq 1 100); do echo "service line $i"; done > "$work/s/one.txt"
