@@ -75,8 +75,7 @@ jobs:
 
       - name: Explorer context menu, end to end
         # Drives the installed DropTarget verbs through the shell's IContextMenu, the code path
-        # File Explorer uses. Not yet proven on hosted runners, so it reports without blocking.
-        continue-on-error: true
+        # File Explorer uses.
         shell: pwsh
         run: |
           cargo build --release --locked --manifest-path apps/desktop/Cargo.toml --example shell_invoke
@@ -149,8 +148,6 @@ jobs:
 
       - name: Finder services, end to end
         # Installs the app and runs its services through NSPerformService, as the Finder does.
-        # Not yet proven on hosted runners, so it reports without blocking.
-        continue-on-error: true
         run: bash apps/desktop/packaging/macos/smoke-test.sh services dist/*.dmg
 
       - uses: actions/upload-artifact@v4

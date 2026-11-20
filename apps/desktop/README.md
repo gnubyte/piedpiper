@@ -106,8 +106,8 @@ attaches them to that GitHub release, next to what `release.yml` publishes.
 The Windows job installs the MSI, runs the installed program, drives the Explorer verbs through
 the shell's own `IContextMenu` (21 selected items, then Extract to folder), and uninstalls. The
 macOS job checks the bundle (universal binary, signature, licenses), round-trips files with it,
-then installs it and runs the Finder services through `NSPerformService`. The two end-to-end
-steps are marked `continue-on-error` until they have passed on GitHub's hosted runners.
+then installs it and runs the Finder services through `NSPerformService`. A failing step
+stops the release from getting that installer.
 
 Signing is optional and turns on when these repository secrets exist:
 
