@@ -11,6 +11,7 @@
 //! not use but that lets PiedPiper's model predict the bin better than CABAC does.
 
 use super::cabac::{init_states, next_state, NUM_CTX};
+use super::recon::{self, Edge, Motion};
 use super::tables::{LAST_8X8, SIG_8X8};
 use super::{Pps, SliceHeader, Sps, B, I};
 use crate::bits::{Bad, R};
@@ -159,6 +160,12 @@ pub struct MbInfo {
     /// Non-zero coefficients per chroma AC block (Cb 0..3, Cr 0..3).
     pub nnzc: [u8; 8],
     pub class: u8,
+    /// Motion vectors per 4x4 block and list, and reference indices per 8x8 block, as used
+    /// for prediction (also for skipped and direct blocks; reconstruction only).
+    pub mv: [[[i16; 2]; 16]; 2],
+    pub rf: [[i8; 4]; 2],
+    /// Intra 4x4/8x8 prediction mode per 4x4 block (reconstruction only).
+    pub ipm: [u8; 16],
 }
 
 impl Default for MbInfo {
@@ -181,6 +188,9 @@ impl Default for MbInfo {
             nnz: [0; 16],
             nnzc: [0; 8],
             class: 0,
+            mv: [[[0; 2]; 16]; 2],
+            rf: [[-1; 4]; 2],
+            ipm: [2; 16],
         }
     }
 }
@@ -211,6 +221,8 @@ pub struct Picture {
     pub cur: Vec<Summary>,
     pub prev: Vec<Summary>,
     next_slice: u32,
+    /// Reconstructed pictures (model context), when enabled.
+    pub rec: Option<Box<recon::Recon>>,
 }
 
 static EMPTY: Summary = Summary { class: 0, cbp: 0, nnz: [0; 16], mvd: [0; 2] };
@@ -220,6 +232,8 @@ struct MbT {
     intra: bool,
     i_nxn: bool,
     i16: bool,
+    /// Intra16x16 prediction mode.
+    i16_mode: u8,
     pcm: bool,
     i16_cbp: u8,
     direct16: bool,
@@ -271,7 +285,7 @@ fn intra_t(v: u32) -> MbT {
             let k = v - 1;
             let chroma = ((k / 4) % 3) as u8;
             let luma = if v >= 13 { 15 } else { 0 };
-            MbT { intra: true, i16: true, i16_cbp: luma | (chroma << 4), ..Default::default() }
+            MbT { intra: true, i16: true, i16_cbp: luma | (chroma << 4), i16_mode: (k % 4) as u8, ..Default::default() }
         }
     }
 }
@@ -349,6 +363,175 @@ pub struct SliceParser<'a> {
     pending: Vec<Summary>,
     /// Number of macroblocks parsed.
     pub count: usize,
+    rc: Box<RecState>,
+}
+
+/// Per-macroblock reconstruction state.
+struct RecState {
+    on: bool,
+    mbx: usize,
+    mby: usize,
+    /// Prediction: luma 16x16, then Cb and Cr 8x8 (raster).
+    pred: [i32; 384],
+    ipsyn: [(bool, u8); 16],
+    cpm: u32,
+    i16m: u32,
+    /// Exact levels of the block just parsed (scan order).
+    cx: [i32; 64],
+    l4: [[i32; 16]; 16],
+    l8: [[i32; 64]; 4],
+    dc: [i32; 16],
+    cdc: [[i32; 4]; 2],
+    cac: [[i32; 16]; 8],
+    /// Prediction features of the next block: per scan position, whole block, and what
+    /// remains after each scan position.
+    feat: [u8; 64],
+    ftex: u32,
+    frem: [u8; 65],
+    luma_done: bool,
+    /// The chroma samples are already written (static skipped macroblocks).
+    chroma_done: bool,
+    /// Boundary mismatch of the next block, x128: top row 0..4, left column 4..8
+    /// (prediction minus the neighbouring reconstructed samples), and which sides exist.
+    bnd: [i32; 16],
+    bnd_ok: u8,
+    /// QP of the block's dequantisation (boundary features).
+    bqp: i32,
+    /// Difference of the two predictions of bi-predicted luma samples (0 elsewhere).
+    dis: [i32; 256],
+    fdis: [u8; 16],
+    dtex: u32,
+    /// Log2 variance (x2) of the macroblock's prediction, and of the last macroblock that
+    /// coded mb_qp_delta (0 = unknown).
+    lv_last: u32,
+    mc: recon::McScratch,
+    pl: [[i32; 256]; 2],
+    pc: [[[i32; 64]; 2]; 2],
+}
+
+impl Default for RecState {
+    fn default() -> Self {
+        RecState {
+            on: false,
+            mbx: 0,
+            mby: 0,
+            pred: [128; 384],
+            ipsyn: [(true, 0); 16],
+            cpm: 0,
+            i16m: 0,
+            cx: [0; 64],
+            l4: [[0; 16]; 16],
+            l8: [[0; 64]; 4],
+            dc: [0; 16],
+            cdc: [[0; 4]; 2],
+            cac: [[0; 16]; 8],
+            feat: [0; 64],
+            ftex: 0,
+            frem: [0; 65],
+            luma_done: false,
+            chroma_done: false,
+            bnd: [0; 16],
+            bnd_ok: 0,
+            bqp: 0,
+            dis: [0; 256],
+            fdis: [0; 16],
+            dtex: 0,
+            lv_last: 0,
+            mc: recon::McScratch::default(),
+            pl: [[0; 256]; 2],
+            pc: [[[0; 64]; 2]; 2],
+        }
+    }
+}
+
+/// 2x the 4x4 inverse transform basis: CI2[x][u] (sample x, frequency u).
+const CI2: [[i32; 4]; 4] = [[2, 2, 2, 1], [2, 1, -2, -2], [2, -1, -2, 2], [2, -2, 2, -1]];
+
+/// Dequantised value of level `c` at raster position `r` of a 4x4 block (flat matrix).
+#[inline]
+fn deq1(c: i32, qp: i32, r: usize) -> i32 {
+    let (m, e) = ((qp % 6) as usize, qp / 6);
+    let v = c.wrapping_mul(recon::level_scale4(m, r));
+    if e >= 4 {
+        v.wrapping_shl((e - 4) as u32)
+    } else {
+        v.wrapping_add(1 << (3 - e)) >> (4 - e)
+    }
+}
+
+/// Projection of the boundary mismatch `e` (top row at 0.., left column at 8..) on the
+/// basis function of raster position `r` of a 4x4 block.
+#[inline]
+fn bproj(e: &[i32; 16], ok: u8, r: usize) -> i64 {
+    let (u, v) = (r & 3, r >> 2);
+    let mut p = 0i64;
+    if ok & 1 != 0 {
+        for x in 0..4 {
+            p += e[x] as i64 * CI2[x][u] as i64;
+        }
+    }
+    if ok & 2 != 0 {
+        for y in 0..4 {
+            p += e[8 + y] as i64 * CI2[y][v] as i64;
+        }
+    }
+    p
+}
+
+/// The same for an 8x8 block (mismatch scaled by 4096, basis C8[x][u] * C8[0][v]).
+#[inline]
+fn bproj8(e: &[i32; 16], ok: u8, r: usize) -> i64 {
+    let (u, v) = (r & 7, r >> 3);
+    let mut p = 0i64;
+    if ok & 1 != 0 {
+        let c0v = recon::C8[0][v] as i64;
+        for x in 0..8 {
+            p += e[x] as i64 * recon::C8[x][u] as i64 * c0v;
+        }
+    }
+    if ok & 2 != 0 {
+        let c0u = recon::C8[0][u] as i64;
+        for y in 0..8 {
+            p += e[8 + y] as i64 * c0u * recon::C8[y][v] as i64;
+        }
+    }
+    p
+}
+
+/// Dequantised value of level `c` at raster position `r` of an 8x8 block (flat matrix).
+#[inline]
+fn deq8(c: i32, qp: i32, r: usize) -> i32 {
+    let (m, e) = ((qp % 6) as usize, qp / 6);
+    let v = c.wrapping_mul(recon::level_scale8(m, r));
+    if e >= 6 {
+        v.wrapping_shl((e - 6) as u32)
+    } else {
+        v.wrapping_add(1 << (5 - e)) >> (6 - e)
+    }
+}
+
+
+#[inline]
+fn bucket(v: u32) -> u8 {
+    if v < 4 {
+        0
+    } else {
+        (30 - v.leading_zeros()).min(7) as u8
+    }
+}
+
+#[inline]
+fn med3(a: i16, b: i16, c: i16) -> i16 {
+    a.max(b).min(a.min(b).max(c))
+}
+
+#[inline]
+fn minpos(a: i8, b: i8) -> i8 {
+    if a >= 0 && b >= 0 {
+        a.min(b)
+    } else {
+        a.max(b)
+    }
 }
 
 impl<'a> SliceParser<'a> {
@@ -370,6 +553,7 @@ impl<'a> SliceParser<'a> {
         init_states(&mut st, sh.slice_qp, model);
         pic.next_slice = pic.next_slice.wrapping_add(1).max(1);
         let sid = pic.next_slice;
+        let pic_has_rec = pic.rec.as_ref().is_some_and(|r| r.have_cur && r.cur.y.w == w * 16 && r.cur.y.h == h * 16);
         Ok(SliceParser {
             sps,
             pps,
@@ -390,6 +574,7 @@ impl<'a> SliceParser<'a> {
             fresh,
             pending: Vec::new(),
             count: 0,
+            rc: Box::new(RecState { on: pic_has_rec, ..Default::default() }),
         })
     }
 
@@ -409,6 +594,13 @@ impl<'a> SliceParser<'a> {
     /// recoded, in stream order, on both the compressing and the decompressing side.
     pub fn commit(self) {
         let n = self.pic.w * self.pic.h;
+        if self.rc.on {
+            if let Some(rec) = self.pic.rec.as_mut() {
+                for m in self.first..(self.first + self.count).min(rec.covered.len()) {
+                    rec.covered[m] = true;
+                }
+            }
+        }
         if self.fresh {
             self.pic.cur = vec![Summary::default(); n];
             self.pic.prev = vec![Summary::default(); n];
@@ -523,6 +715,16 @@ impl<'a> SliceParser<'a> {
         self.b = (addr >= w && self.pic.mbs[addr - w].slice == self.sid).then(|| addr - w);
         self.cur = MbInfo { slice: self.sid, ..Default::default() };
         self.curlv = Levels::default();
+        if self.rc.on {
+            let rc = &mut *self.rc;
+            rc.mbx = col;
+            rc.mby = addr / w;
+            rc.luma_done = false;
+            rc.chroma_done = false;
+            rc.feat = [0; 64];
+            rc.ftex = 0;
+            rc.frem = [0; 65];
+        }
     }
 
     fn skip_mb(&mut self, is_b: bool) {
@@ -536,9 +738,102 @@ impl<'a> SliceParser<'a> {
         }
         self.last_dqp_nz = false;
         self.last_dqp = 0;
+        if self.rc.on {
+            if is_b {
+                let (rf, mv) = self.direct_motion();
+                self.cur.rf = rf;
+                self.cur.mv = mv;
+            } else {
+                self.pskip_motion();
+            }
+            if !self.static_skip() {
+                self.inter_pred();
+            }
+        }
+    }
+
+    /// Reconstruction of a skipped macroblock whose motion is zero everywhere (static
+    /// content) straight from the reference pictures; false when it is not such a
+    /// macroblock. Gives the same samples as [`Self::inter_pred`] plus [`Self::recon_finish`].
+    fn static_skip(&mut self) -> bool {
+        if self.sh.ri.explicit_wp {
+            return false;
+        }
+        let rf = self.cur.rf;
+        for l in 0..2 {
+            if rf[l].iter().any(|&r| r != rf[l][0]) || (rf[l][0] >= 0 && self.cur.mv[l].iter().any(|&m| m != [0, 0])) {
+                return false;
+            }
+        }
+        let Some(rec) = self.pic.rec.as_mut() else { return false };
+        let (w, h) = (rec.cur.y.w, rec.cur.y.h);
+        let pick = |l: usize| -> Option<usize> {
+            let r = rf[l][0];
+            let i = *rec.list[l].get(usize::try_from(r).ok()?)?;
+            (i != usize::MAX && rec.dpb[i].y.w == w && rec.dpb[i].y.h == h).then_some(i)
+        };
+        let (i0, i1) = (pick(0), pick(1));
+        let weights = match (rf[0][0] >= 0, rf[1][0] >= 0, i0, i1) {
+            (true, false, Some(_), _) | (false, true, _, Some(_)) => None,
+            (true, true, Some(a), Some(b)) => {
+                if self.pps.weighted_bipred_idc == 2 {
+                    let (p0, p1) = (&rec.dpb[a], &rec.dpb[b]);
+                    let tb = (rec.cur.poc - p0.poc).clamp(-128, 127);
+                    let td = (p1.poc - p0.poc).clamp(-128, 127);
+                    Some(if td == 0 || p0.long_term || p1.long_term {
+                        (32, 32)
+                    } else {
+                        let tx = (16384 + (td / 2).abs()) / td;
+                        let dsf = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+                        if !(-64..=128).contains(&(dsf >> 2)) {
+                            (32, 32)
+                        } else {
+                            (64 - (dsf >> 2), dsf >> 2)
+                        }
+                    })
+                } else {
+                    Some((0, 0)) // plain average
+                }
+            }
+            _ => return false,
+        };
+        let (mbx, mby) = (self.rc.mbx, self.rc.mby);
+        let cur = std::mem::take(&mut rec.cur);
+        let mut cur = cur;
+        {
+            let a = &rec.dpb[i0.or(i1).expect("one reference")];
+            let b = i1.map(|i| &rec.dpb[i]);
+            for (dst, pa, pb, n, x0, y0) in [
+                (&mut cur.y, &a.y, b.map(|q| &q.y), 16usize, mbx * 16, mby * 16),
+                (&mut cur.u, &a.u, b.map(|q| &q.u), 8, mbx * 8, mby * 8),
+                (&mut cur.v, &a.v, b.map(|q| &q.v), 8, mbx * 8, mby * 8),
+            ] {
+                let st = dst.w;
+                for j in 0..n {
+                    let o = (y0 + j) * st + x0;
+                    match (weights, pb) {
+                        (Some((w0, w1)), Some(pb)) => {
+                            let (ra, rb) = (&pa.d[o..o + n], &pb.d[o..o + n]);
+                            for (i, d) in dst.d[o..o + n].iter_mut().enumerate() {
+                                let (p, q) = (ra[i] as i32, rb[i] as i32);
+                                *d = if w0 == 0 && w1 == 0 { ((p + q + 1) >> 1) as u8 } else { recon::clip1((p * w0 + q * w1 + 32) >> 6) };
+                            }
+                        }
+                        _ => dst.d[o..o + n].copy_from_slice(&pa.d[o..o + n]),
+                    }
+                }
+            }
+        }
+        rec.cur = cur;
+        self.rc.luma_done = true;
+        self.rc.chroma_done = true;
+        true
     }
 
     fn finish_mb(&mut self) {
+        if self.rc.on {
+            self.recon_finish();
+        }
         let c = self.cur;
         self.pic.mbs[self.addr] = c;
         self.pic.lv[self.addr] = self.curlv;
@@ -622,6 +917,25 @@ impl<'a> SliceParser<'a> {
                     }
                 }
             }
+            if self.rc.on {
+                self.cur.rf = self.cur.refi;
+                self.cur.mv = [[[0; 2]; 16]; 2];
+                if sub.iter().any(|s| s.direct) {
+                    let (rf, mv) = self.direct_motion();
+                    for (i, s) in sub.iter().enumerate() {
+                        if s.direct {
+                            let (x0, y0) = ((i & 1) * 2, (i >> 1) * 2);
+                            for l in 0..2 {
+                                self.cur.rf[l][i] = rf[l][i];
+                                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                                    let k = (y0 + dy) * 4 + x0 + dx;
+                                    self.cur.mv[l][k] = mv[l][k];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             for list in 0..2 {
                 for (i, s) in sub.iter().enumerate() {
                     if !s.direct && s.mode & (1 << list) != 0 {
@@ -641,6 +955,9 @@ impl<'a> SliceParser<'a> {
                     no_sub_lt8 = false;
                 }
             }
+            if self.rc.on {
+                self.inter_pred();
+            }
         } else {
             if self.pps.transform_8x8_mode && t.i_nxn {
                 self.cur.t8 = self.t8flag(io)? == 1;
@@ -650,15 +967,20 @@ impl<'a> SliceParser<'a> {
                     let n = if self.cur.t8 { 4 } else { 16 };
                     for k in 0..n {
                         let h = (self.cur.t8 as u32) << 5 | k;
-                        if self.dec(io, 68, kind::IPRED, h, 0)? == 0 {
+                        let mut rem = 0u8;
+                        let prev = self.dec(io, 68, kind::IPRED, h, 0)? == 1;
+                        if !prev {
                             for j in 0..3 {
-                                self.dec(io, 69, kind::IPRED, h, 1 + j)?;
+                                rem |= (self.dec(io, 69, kind::IPRED, h, 1 + j)? as u8) << j;
                             }
                         }
+                        self.rc.ipsyn[k as usize] = (prev, rem);
                     }
                 }
                 let m = self.chroma_pred_mode(io)?;
                 self.cur.cpred_nz = m != 0;
+                self.rc.cpm = m;
+                self.rc.i16m = t.i16_mode as u32;
             } else if !t.direct16 {
                 let rects = PART_RECTS[t.shape as usize];
                 for list in 0..2 {
@@ -674,6 +996,10 @@ impl<'a> SliceParser<'a> {
                         }
                     }
                 }
+                if self.rc.on {
+                    self.cur.rf = self.cur.refi;
+                    self.cur.mv = [[[0; 2]; 16]; 2];
+                }
                 for list in 0..2 {
                     for (p, &(x, y, w, h)) in rects.iter().enumerate() {
                         if t.pred[p] & (1 << list) != 0 {
@@ -683,6 +1009,18 @@ impl<'a> SliceParser<'a> {
                 }
             } else {
                 self.cur.direct8 = 0xF;
+            }
+            if self.rc.on {
+                if t.intra {
+                    self.intra_pred_mb();
+                } else {
+                    if t.direct16 {
+                        let (rf, mv) = self.direct_motion();
+                        self.cur.rf = rf;
+                        self.cur.mv = mv;
+                    }
+                    self.inter_pred();
+                }
             }
         }
         if !t.i16 {
@@ -706,6 +1044,9 @@ impl<'a> SliceParser<'a> {
         } else {
             self.last_dqp_nz = false;
             self.last_dqp = 0;
+            if self.rc.on && self.cur.i_nxn {
+                self.intra_nxn_luma_norez();
+            }
         }
         Ok(())
     }
@@ -918,8 +1259,35 @@ impl<'a> SliceParser<'a> {
     fn mvd<T: BinIo>(&mut self, io: &mut T, list: usize, x: usize, y: usize, w: usize, h: usize, shape: u32) -> R<()> {
         let mut vals = [0u16; 2];
         let mut svals = [0i16; 2];
+        let (mvp, cand, cand2, spread) = if self.rc.on { self.mv_cands(list, x, y, w, h, shape) } else { ([0, 0], None, None, [0, 0]) };
         for comp in 0..2 {
-            let c = self.mvd_ctx(list, comp, x, y, shape, vals[0]);
+            let mut c = self.mvd_ctx(list, comp, x, y, shape, vals[0]);
+            if self.rc.on {
+                // The differences the candidates predict for this component: the co-located
+                // motion (scaled), and for list 1 the partition's own list-0 vector (scaled).
+                // Classes: 0 none, 1 zero, 2..=7 positive by magnitude, 8.. negative.
+                let class = |cand: Option<[i16; 2]>| -> u32 {
+                    cand.map_or(0, |cv| {
+                        let d = cv[comp] as i32 - mvp[comp] as i32;
+                        let m = d.unsigned_abs();
+                        let mag = if m == 0 { 0 } else { (32 - m.leading_zeros()).min(6) };
+                        1 + mag + if d < 0 { 7 } else { 0 }
+                    })
+                };
+                let sign = |t: u32| -> u32 {
+                    match t {
+                        0 => 0,
+                        1 => 3,
+                        8.. => 2,
+                        _ => 1,
+                    }
+                };
+                let (tf, tf2) = (class(cand), class(cand2));
+                c.first.a |= tf << 8 | tf2 << 12;
+                c.first.d |= spread[comp] << 16;
+                c.sign_c |= sign(tf) << 6 | sign(tf2) << 8;
+                c.hs |= tf << 12;
+            }
             // Prefix bin `m` (1..=8), suffix bins, sign: also announced to the model ahead.
             let un = |m: u32| Hint { ctx: (c.base + 2 + m.min(4) as usize) as u16, a: c.first.a | m, ..c.first };
             let suf = |a: u32, cc: u32| Hint { ctx: 0, kind: kind::MVD_SUF, a, b: c.hs, c: cc, d: 0 };
@@ -994,7 +1362,113 @@ impl<'a> SliceParser<'a> {
                 self.cur.mvs[list][yy * 4 + xx] = svals;
             }
         }
+        if self.rc.on {
+            let mv = [mvp[0].wrapping_add(svals[0]), mvp[1].wrapping_add(svals[1])];
+            self.set_motion(list, x, y, w, h, mv);
+        }
         Ok(())
+    }
+
+    /// Motion vector predictor of a partition being parsed, and a temporal candidate (the
+    /// co-located motion, scaled to this partition's reference).
+    #[allow(clippy::type_complexity)]
+    fn mv_cands(&self, l: usize, x: usize, y: usize, w: usize, h: usize, shape: u32) -> ([i16; 2], Option<[i16; 2]>, Option<[i16; 2]>, [u32; 2]) {
+        let b8 = (y / 2) * 2 + x / 2;
+        let refidx = self.cur.rf[l][b8];
+        let mut done = 0u16;
+        let rect_mask = |x: usize, y: usize, w: usize, h: usize| -> u16 {
+            let mut m = 0u16;
+            for yy in y..y + h {
+                for xx in x..x + w {
+                    m |= 1 << (yy * 4 + xx);
+                }
+            }
+            m
+        };
+        let dir = if shape >= 4 {
+            let s = (shape - 4) as usize;
+            let rects = PART_RECTS[s.min(2)];
+            let p = rects.iter().position(|&(rx, ry, _, _)| rx == x && ry == y).unwrap_or(0);
+            for &(rx, ry, rw, rh) in &rects[..p] {
+                done |= rect_mask(rx, ry, rw, rh);
+            }
+            match s {
+                1 => 1 + p,
+                2 => 3 + p,
+                _ => 0,
+            }
+        } else {
+            let i = b8;
+            for j in 0..i {
+                done |= rect_mask((j & 1) * 2, (j >> 1) * 2, 2, 2);
+            }
+            let (x0, y0) = ((i & 1) * 2, (i >> 1) * 2);
+            for &(dx, dy, rw, rh) in SUB_RECTS[shape as usize] {
+                if x0 + dx == x && y0 + dy == y {
+                    break;
+                }
+                done |= rect_mask(x0 + dx, y0 + dy, rw, rh);
+            }
+            0
+        };
+        let _ = h;
+        let mvp = self.pred_mv(l, x as i32, y as i32, w as i32, refidx, dir, done);
+        // Spread of the neighbours' vectors around the predictor (same reference only).
+        let mut spread = [0u32; 2];
+        for n in [self.mv_nb(l, x as i32 - 1, y as i32, done), self.mv_nb(l, x as i32, y as i32 - 1, done), self.mv_nb(l, x as i32 + w as i32, y as i32 - 1, done)].into_iter().flatten() {
+            if n.0 == refidx {
+                for c in 0..2 {
+                    let d = (n.1[c] as i32 - mvp[c] as i32).unsigned_abs();
+                    spread[c] = spread[c].max(if d == 0 { 0 } else { (33 - d.leading_zeros()).min(7) });
+                }
+            }
+        }
+        let Some(rec) = self.pic.rec.as_ref() else { return (mvp, None, None, spread) };
+        // The partition's list-0 vector scaled to its list-1 reference (bi-prediction).
+        let cand2 = if l == 1 && self.cur.rf[0][b8] >= 0 {
+            let mv0 = self.cur.mv[0][y * 4 + x];
+            match (rec.refpic(0, self.cur.rf[0][b8] as i32), rec.refpic(1, refidx as i32)) {
+                (Some(p0), Some(p1)) => {
+                    let tb = (rec.cur.poc - p1.poc).clamp(-128, 127);
+                    let td = (rec.cur.poc - p0.poc).clamp(-128, 127);
+                    if td == 0 {
+                        Some(mv0)
+                    } else {
+                        let tx = (16384 + (td / 2).abs()) / td;
+                        let dsf = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+                        Some([((dsf * mv0[0] as i32 + 128) >> 8) as i16, ((dsf * mv0[1] as i32 + 128) >> 8) as i16])
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let col = if self.sh.slice_type == B { rec.refpic(1, 0) } else { rec.refpic(0, 0) };
+        let cand = col.and_then(|cp| {
+            if cp.y.w != rec.cur.y.w || cp.y.h != rec.cur.y.h {
+                return None;
+            }
+            let m = *cp.mf.get((self.rc.mby * 4 + y) * cp.w4 + self.rc.mbx * 4 + x)?;
+            let lu = if m.refi[l] >= 0 {
+                l
+            } else if m.refi[1 - l] >= 0 {
+                1 - l
+            } else {
+                return None;
+            };
+            let mv = m.mv[lu];
+            let cur_ref = rec.refpic(l, refidx as i32)?;
+            let tb = (rec.cur.poc - cur_ref.poc).clamp(-128, 127);
+            let td = (cp.poc - m.rpoc[lu]).clamp(-128, 127);
+            if td == 0 || m.rpoc[lu] == i32::MIN {
+                return Some(mv);
+            }
+            let tx = (16384 + (td / 2).abs()) / td;
+            let dsf = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+            Some([((dsf * mv[0] as i32 + 128) >> 8) as i16, ((dsf * mv[1] as i32 + 128) >> 8) as i16])
+        });
+        (mvp, cand, cand2, spread)
     }
 
     fn cbp_luma_cond(&self, nb: Option<usize>, b8: usize) -> usize {
@@ -1026,22 +1500,85 @@ impl<'a> SliceParser<'a> {
         }
     }
 
+    /// Prediction texture (and bi-prediction disagreement) of each 8x8 luma block and of
+    /// the chroma, for coded_block_pattern; zeros where no prediction exists yet.
+    fn cbp_feats(&self) -> ([u32; 4], u32) {
+        if !self.rc.on || self.cur.intra {
+            return ([0; 4], 0);
+        }
+        let mut f = [0u32; 4];
+        for (b8, fv) in f.iter_mut().enumerate() {
+            let (x0, y0) = ((b8 & 1) * 8, (b8 >> 1) * 8);
+            let (mut tex, mut dis) = (0u32, 0u32);
+            for sb in 0..4 {
+                let (sx, sy) = (x0 + (sb & 1) * 4, y0 + (sb >> 1) * 4);
+                let mut s = [0i32; 16];
+                for j in 0..4 {
+                    for i in 0..4 {
+                        s[j * 4 + i] = self.rc.pred[(sy + j) * 16 + sx + i];
+                        dis += self.rc.dis[(sy + j) * 16 + sx + i].unsigned_abs();
+                    }
+                }
+                let mut qm = [0u32; 16];
+                recon::qmag4(&s, self.qp, &mut qm);
+                tex += qm[1..].iter().sum::<u32>();
+            }
+            *fv = bucket(tex) as u32 | (bucket(dis * 4) as u32) << 3;
+        }
+        let mut ct = 0u32;
+        let qpc = recon::chroma_qp(self.qp, self.pps.chroma_qp_offset);
+        for c in 0..2 {
+            for b4 in 0..4 {
+                let (x, y) = ((b4 & 1) * 4, (b4 >> 1) * 4);
+                let mut s = [0i32; 16];
+                for j in 0..4 {
+                    for i in 0..4 {
+                        s[j * 4 + i] = self.rc.pred[256 + c * 64 + (y + j) * 8 + x + i];
+                    }
+                }
+                let mut qm = [0u32; 16];
+                recon::qmag4(&s, qpc, &mut qm);
+                ct += qm[1..].iter().sum::<u32>();
+            }
+        }
+        (f, bucket(ct) as u32)
+    }
+
     fn cbp<T: BinIo>(&mut self, io: &mut T) -> R<u8> {
         let colo = self.colo(self.addr).cbp as u32;
         let cls = self.cur.class as u32;
         let mut cbp = 0u8;
+        let (fl, fc) = self.cbp_feats();
         for b8 in 0..4usize {
             let (x8, y8) = (b8 & 1, b8 >> 1);
             let ca = if x8 == 1 { ((cbp >> (b8 - 1)) & 1 == 0) as usize } else { self.cbp_luma_cond(self.a, y8 * 2 + 1) };
             let cb = if y8 == 1 { ((cbp >> (b8 - 2)) & 1 == 0) as usize } else { self.cbp_luma_cond(self.b, 2 + x8) };
-            let bit = self.dec(io, 73 + ca + 2 * cb, kind::CBP_L, b8 as u32 | (cbp as u32) << 2 | cls << 6, colo)?;
+            let ctx = 73 + ca + 2 * cb;
+            let st = self.st[ctx];
+            let h = Hint {
+                ctx: ctx as u16,
+                kind: kind::CBP_L,
+                a: b8 as u32 | (cbp as u32) << 2 | cls << 6,
+                b: colo,
+                c: fl[b8],
+                d: 0,
+            };
+            let bit = io.decision(st, &h)?;
+            self.st[ctx] = next_state(st, bit);
             cbp |= (bit as u8) << b8;
         }
         let (a1, a2) = self.cbp_chroma_cond(self.a);
         let (b1, b2) = self.cbp_chroma_cond(self.b);
         let hl = (cbp as u32) << 2 | cls << 6;
-        if self.dec(io, 77 + a1 + 2 * b1, kind::CBP_C, hl, colo >> 4)? == 1 {
-            let c = 1 + self.dec(io, 81 + a2 + 2 * b2, kind::CBP_C, hl | 1, colo >> 4)?;
+        let cc = if self.rc.on { fc | (fl.iter().map(|v| v & 7).max().unwrap_or(0)) << 4 } else { 0 };
+        let dc = |me: &mut Self, io: &mut T, ctx: usize, a: u32| -> R<u32> {
+            let st = me.st[ctx];
+            let bin = io.decision(st, &Hint { ctx: ctx as u16, kind: kind::CBP_C, a, b: colo >> 4, c: cc, d: 0 })?;
+            me.st[ctx] = next_state(st, bin);
+            Ok(bin)
+        };
+        if dc(self, io, 77 + a1 + 2 * b1, hl)? == 1 {
+            let c = 1 + dc(self, io, 81 + a2 + 2 * b2, hl | 1)?;
             cbp |= (c as u8) << 4;
         }
         Ok(cbp)
@@ -1074,10 +1611,25 @@ impl<'a> SliceParser<'a> {
         let mut ctx = 60 + self.last_dqp_nz as usize;
         let h = q(self.last_dqp, 7) | (self.cur.class as u32) << 3;
         let mut v = 0u32;
-        if self.dec(io, ctx, kind::DQP, 0, h)? == 1 {
+        let (fc, fd) = if self.rc.on {
+            let lv = self.mb_logvar();
+            let last = self.rc.lv_last;
+            self.rc.lv_last = lv;
+            let d = if lv == 0 || last == 0 { 0 } else { (lv as i32 - last as i32).clamp(-7, 7) + 8 };
+            (lv, d as u32)
+        } else {
+            (0, 0)
+        };
+        let dq = |me: &mut Self, io: &mut T, ctx: usize, a: u32| -> R<u32> {
+            let s = me.st[ctx];
+            let bin = io.decision(s, &Hint { ctx: ctx as u16, kind: kind::DQP, a, b: h, c: fc, d: fd })?;
+            me.st[ctx] = next_state(s, bin);
+            Ok(bin)
+        };
+        if dq(self, io, ctx, 0)? == 1 {
             v = 1;
             ctx = 62;
-            while self.dec(io, ctx, kind::DQP, q(v, 7), h)? == 1 {
+            while dq(self, io, ctx, q(v, 7))? == 1 {
                 ctx = 63;
                 v += 1;
                 if v > 200 {
@@ -1094,35 +1646,86 @@ impl<'a> SliceParser<'a> {
 
     fn residual<T: BinIo>(&mut self, io: &mut T) -> R<()> {
         let cbp = self.cur.cbp;
+        let on = self.rc.on;
+        let nxn = self.cur.i_nxn;
         if self.cur.i16 {
+            self.clear_feat();
             self.block(io, 0, 0, 16)?;
         }
+        let mut dcs = [0i32; 16];
+        if on && self.cur.i16 && (self.cur.cbf >> 16) & 1 == 1 {
+            recon::luma_dc(&self.rc.dc, self.qp, &mut dcs);
+        }
         for b8 in 0..4usize {
-            if (cbp >> b8) & 1 == 0 {
+            let coded = (cbp >> b8) & 1 == 1;
+            if !coded && !on {
                 continue;
             }
             if !self.cur.t8 {
                 for b4 in 0..4usize {
                     let blk = b8 * 4 + b4;
-                    if self.cur.i16 {
-                        self.block(io, 1, blk, 15)?;
-                    } else {
-                        self.block(io, 2, blk, 16)?;
+                    if on {
+                        let (x, y) = blk_xy(blk);
+                        if nxn {
+                            self.intra4_pred(blk);
+                        }
+                        if coded {
+                            self.feat_luma4(x, y);
+                            self.bnd_luma4(x, y);
+                        }
+                    }
+                    if coded {
+                        if self.cur.i16 {
+                            self.block(io, 1, blk, 15)?;
+                        } else {
+                            self.block(io, 2, blk, 16)?;
+                        }
+                    }
+                    if on {
+                        let (x, y) = blk_xy(blk);
+                        self.recon_l4(x, y, self.cur.i16.then(|| dcs[y * 4 + x]));
                     }
                 }
             } else {
-                self.block8x8(io, b8)?;
+                if on {
+                    if nxn {
+                        self.intra8_pred(b8);
+                    }
+                    self.clear_feat();
+                    if coded {
+                        self.feat_luma8(b8);
+                        self.bnd_luma8(b8);
+                    }
+                }
+                if coded {
+                    self.block8x8(io, b8)?;
+                }
+                if on {
+                    self.recon_l8(b8);
+                }
             }
+        }
+        if on {
+            self.rc.luma_done = true;
         }
         let cc = cbp >> 4;
         if cc != 0 {
             for c in 0..2 {
+                if on {
+                    self.clear_feat();
+                }
                 self.block(io, 3, c, 4)?;
             }
         }
         if cc == 2 {
             for c in 0..2 {
                 for b4 in 0..4 {
+                    if on {
+                        self.feat_chroma4(c, b4);
+                        self.rc.bnd_ok = 0;
+                                        self.rc.fdis = [0; 16];
+                        self.rc.dtex = 0;
+                    }
                     self.block(io, 4, c * 4 + b4, 15)?;
                 }
             }
@@ -1239,7 +1842,8 @@ impl<'a> SliceParser<'a> {
             let cnt = |l: &Option<[i8; 64]>| l.map_or(0, |l| l[off..off + max].iter().filter(|&&v| v != 0).count() as u8);
             io.prefetch(&sig_hint(cat, 0, 0, q(nc, 17) | q(colo, 63) << 6, self.extra(), la0, lb0, cnt(&na), cnt(&nb)));
         }
-        let cbf = self.dec4(io, 85 + CBF_OFF[cat] + inc, kind::CBF, cat as u32 | (self.cur.intra as u32) << 4, hb, hc, self.extra())?;
+        let cbf_d = self.extra() | if self.rc.on { self.rc.ftex << 16 | self.rc.dtex << 20 } else { 0 };
+        let cbf = self.dec4(io, 85 + CBF_OFF[cat] + inc, kind::CBF, cat as u32 | (self.cur.intra as u32) << 4, hb, hc, cbf_d)?;
         if cbf == 0 {
             return Ok(());
         }
@@ -1254,6 +1858,18 @@ impl<'a> SliceParser<'a> {
         let la = na.unwrap_or([0; 64]);
         let lb = nb.unwrap_or([0; 64]);
         let n = self.coeffs(io, cat, max, q(nc, 17), colo, &la, &lb, off, &mut out)?;
+        if self.rc.on {
+            let rc = &mut *self.rc;
+            match cat {
+                0 => rc.dc.copy_from_slice(&rc.cx[..16]),
+                1 | 2 => {
+                    let (x, y) = blk_xy(idx);
+                    rc.l4[y * 4 + x].copy_from_slice(&rc.cx[..16]);
+                }
+                3 => rc.cdc[idx].copy_from_slice(&rc.cx[..4]),
+                _ => rc.cac[idx].copy_from_slice(&rc.cx[..16]),
+            }
+        }
         match cat {
             0 => self.curlv.dc.copy_from_slice(&out[..16]),
             1 | 2 => {
@@ -1339,6 +1955,10 @@ impl<'a> SliceParser<'a> {
         let lb = self.nb_l4(x0 as i32, y0 as i32 - 1).unwrap_or([0; 64]);
         let mut out = [0i8; 64];
         let n = self.coeffs(io, 5, 64, q(nc * 4, 63), q(colo, 63), &la, &lb, 0, &mut out)?;
+        if self.rc.on {
+            let rc = &mut *self.rc;
+            rc.l8[b8] = rc.cx;
+        }
         self.curlv.l8[b8] = out;
         for b4 in 0..4 {
             self.cur.cbf |= 1 << (b8 * 4 + b4);
@@ -1348,6 +1968,889 @@ impl<'a> SliceParser<'a> {
             self.cur.nnz[(y0 + dy) * 4 + x0 + dx] = share;
         }
         Ok(())
+    }
+
+    // --- reconstruction (model context) ------------------------------------------------
+
+    fn clear_feat(&mut self) {
+        self.rc.fdis = [0; 16];
+        self.rc.dtex = 0;
+        self.rc.feat = [0; 64];
+        self.rc.ftex = 0;
+        self.rc.frem = [0; 65];
+        self.rc.bnd_ok = 0;
+    }
+
+    fn feat_luma8(&mut self, b8: usize) {
+        let (x0, y0) = ((b8 & 1) * 8, (b8 >> 1) * 8);
+        let mut s = [0i32; 64];
+        for j in 0..8 {
+            for i in 0..8 {
+                s[j * 8 + i] = self.rc.pred[(y0 + j) * 16 + x0 + i];
+            }
+        }
+        let mut qm = [0u32; 64];
+        recon::qmag8(&s, self.qp, &mut qm);
+        let rc = &mut *self.rc;
+        let mut tex = 0u32;
+        for i in 0..64 {
+            let r = recon::ZZ8[i] as usize;
+            rc.feat[i] = bucket(qm[r]);
+            if i > 0 {
+                tex = tex.saturating_add(qm[r]);
+            }
+        }
+        rc.ftex = bucket(tex) as u32;
+        let mut acc = 0u32;
+        rc.frem[64] = 0;
+        for i in (0..64).rev() {
+            rc.frem[i + 1] = bucket(acc);
+            acc = acc.saturating_add(qm[recon::ZZ8[i] as usize]);
+        }
+        rc.frem[0] = bucket(acc);
+        rc.fdis = [0; 16];
+        rc.dtex = 0;
+    }
+
+    /// Boundary mismatch of luma 8x8 block `b8` (x4096) and the magnitude estimates.
+    fn bnd_luma8(&mut self, b8: usize) {
+        let (x8, y8) = (b8 & 1, b8 >> 1);
+        let top = y8 > 0 || self.b.is_some();
+        let left = x8 > 0 || self.a.is_some();
+        let (px, py) = (self.rc.mbx * 16 + x8 * 8, self.rc.mby * 16 + y8 * 8);
+        let rec = self.pic.rec.as_ref().expect("reconstruction on");
+        let pl = &rec.cur.y;
+        let w = pl.w;
+        let rc = &mut *self.rc;
+        rc.bnd = [0; 16];
+        rc.bnd_ok = top as u8 | (left as u8) << 1;
+        rc.bqp = self.qp;
+        if top {
+            for i in 0..8 {
+                rc.bnd[i] = 4096 * (rc.pred[(y8 * 8) * 16 + x8 * 8 + i] - pl.d[(py - 1) * w + px + i] as i32);
+            }
+        }
+        if left {
+            for j in 0..8 {
+                rc.bnd[8 + j] = 4096 * (rc.pred[(y8 * 8 + j) * 16 + x8 * 8] - pl.d[(py + j) * w + px - 1] as i32);
+            }
+        }
+    }
+
+    /// Boundary mismatch between the prediction of luma 4x4 block (`x`, `y`) and the
+    /// reconstructed samples above and to the left of it.
+    fn bnd_luma4(&mut self, x: usize, y: usize) {
+        let top = y > 0 || self.b.is_some();
+        let left = x > 0 || self.a.is_some();
+        let (px, py) = (self.rc.mbx * 16 + x * 4, self.rc.mby * 16 + y * 4);
+        let rec = self.pic.rec.as_ref().expect("reconstruction on");
+        let pl = &rec.cur.y;
+        let w = pl.w;
+        let rc = &mut *self.rc;
+        rc.bnd = [0; 16];
+        rc.bnd_ok = top as u8 | (left as u8) << 1;
+        rc.bqp = self.qp;
+        if top {
+            for i in 0..4 {
+                rc.bnd[i] = 128 * (rc.pred[(y * 4) * 16 + x * 4 + i] - pl.d[(py - 1) * w + px + i] as i32);
+            }
+        }
+        if left {
+            for j in 0..4 {
+                rc.bnd[8 + j] = 128 * (rc.pred[(y * 4 + j) * 16 + x * 4] - pl.d[(py + j) * w + px - 1] as i32);
+            }
+        }
+    }
+
+    fn set_feat(&mut self, s: &[i32; 16], qp: i32) {
+        let mut qm = [0u32; 16];
+        recon::qmag4(s, qp, &mut qm);
+        let rc = &mut *self.rc;
+        let mut tex = 0u32;
+        for i in 0..16 {
+            let r = recon::ZZ4[i] as usize;
+            rc.feat[i] = bucket(qm[r]);
+            if i > 0 {
+                tex += qm[r];
+            }
+        }
+        rc.ftex = bucket(tex) as u32;
+        let mut acc = 0u32;
+        rc.frem[16] = 0;
+        for i in (0..16).rev() {
+            rc.frem[i + 1] = bucket(acc);
+            acc += qm[recon::ZZ4[i] as usize];
+        }
+        rc.frem[0] = bucket(acc);
+    }
+
+    fn feat_luma4(&mut self, x: usize, y: usize) {
+        let mut s = [0i32; 16];
+        let mut dd = [0i32; 16];
+        for j in 0..4 {
+            for i in 0..4 {
+                s[j * 4 + i] = self.rc.pred[(y * 4 + j) * 16 + x * 4 + i];
+                dd[j * 4 + i] = self.rc.dis[(y * 4 + j) * 16 + x * 4 + i];
+            }
+        }
+        self.set_feat(&s, self.qp);
+        let mut qm = [0u32; 16];
+        if dd.iter().any(|&v| v != 0) {
+            // Half the difference: the error of the average if one prediction were right.
+            recon::qmag4(&dd, self.qp, &mut qm);
+            let mut tot = 0u32;
+            for i in 0..16 {
+                let r = recon::ZZ4[i] as usize;
+                self.rc.fdis[i] = 1 + bucket(qm[r] / 2).min(6);
+                tot += qm[r] / 2;
+            }
+            self.rc.dtex = 1 + bucket(tot).min(6) as u32;
+        } else {
+            self.rc.fdis = [0; 16];
+            self.rc.dtex = 0;
+        }
+    }
+
+    fn feat_chroma4(&mut self, c: usize, b4: usize) {
+        let (x, y) = ((b4 & 1) * 4, (b4 >> 1) * 4);
+        let base = 256 + c * 64;
+        let mut s = [0i32; 16];
+        for j in 0..4 {
+            for i in 0..4 {
+                s[j * 4 + i] = self.rc.pred[base + (y + j) * 8 + x + i];
+            }
+        }
+        let off = if c == 0 { self.pps.chroma_qp_offset } else { self.pps.chroma_qp_offset2 };
+        self.set_feat(&s, recon::chroma_qp(self.qp, off));
+    }
+
+    /// Log2 of the luma variance (x2, plus one; 0 = unknown) of the current macroblock's
+    /// prediction, or for intra macroblocks of the co-located area of the latest reference.
+    fn mb_logvar(&self) -> u32 {
+        let mut s = [0i32; 256];
+        if self.cur.intra {
+            let Some(rec) = self.pic.rec.as_ref() else { return 0 };
+            let Some(p) = rec.dpb.last().filter(|p| p.y.w == rec.cur.y.w && p.y.h == rec.cur.y.h) else { return 0 };
+            let (px, py) = (self.rc.mbx * 16, self.rc.mby * 16);
+            for j in 0..16 {
+                for i in 0..16 {
+                    s[j * 16 + i] = p.y.d[(py + j) * p.y.w + px + i] as i32;
+                }
+            }
+        } else {
+            s.copy_from_slice(&self.rc.pred[..256]);
+        }
+        let sum: i64 = s.iter().map(|&v| v as i64).sum();
+        let sq: i64 = s.iter().map(|&v| (v * v) as i64).sum();
+        let var = (sq - sum * sum / 256).max(0) as u64;
+        if var == 0 {
+            return 1;
+        }
+        let lg2 = 63 - var.leading_zeros();
+        let half = (var >> lg2.saturating_sub(1)) & 1;
+        (2 + 2 * lg2 + half as u32).min(48)
+    }
+
+    fn nb_c(&self) -> Option<usize> {
+        let w = self.pic.w;
+        let col = self.addr % w;
+        (self.addr >= w && col + 1 < w && self.pic.mbs[self.addr - w + 1].slice == self.sid).then(|| self.addr - w + 1)
+    }
+
+    fn nb_d(&self) -> Option<usize> {
+        let w = self.pic.w;
+        let col = self.addr % w;
+        (self.addr >= w && col > 0 && self.pic.mbs[self.addr - w - 1].slice == self.sid).then(|| self.addr - w - 1)
+    }
+
+    fn intra_ok(&self, n: Option<usize>) -> bool {
+        n.is_some_and(|i| !self.pps.constrained_intra_pred || self.pic.mbs[i].intra)
+    }
+
+    /// Neighbouring samples of an `n`x`n` block at (`px`, `py`) of a plane of the current
+    /// picture (`plane` 0 luma, 1 Cb, 2 Cr).
+    #[allow(clippy::too_many_arguments)]
+    fn edge(&self, plane: usize, px: usize, py: usize, n: usize, top: bool, left: bool, corner: bool, tr: bool) -> Edge {
+        let rec = self.pic.rec.as_ref().expect("reconstruction on");
+        let p = match plane {
+            0 => &rec.cur.y,
+            1 => &rec.cur.u,
+            _ => &rec.cur.v,
+        };
+        let w = p.w;
+        let mut e = Edge { top: [128; 32], left: [128; 16], corner: 128, has_top: top, has_left: left, has_corner: corner };
+        if top {
+            for i in 0..n {
+                e.top[i] = p.d[(py - 1) * w + px + i] as i32;
+            }
+            for i in n..2 * n {
+                e.top[i] = if tr && px + i < w { p.d[(py - 1) * w + px + i] as i32 } else { e.top[n - 1] };
+            }
+        }
+        if left {
+            for j in 0..n {
+                e.left[j] = p.d[(py + j) * w + px - 1] as i32;
+            }
+        }
+        if corner {
+            e.corner = p.d[(py - 1) * w + px - 1] as i32;
+        }
+        e
+    }
+
+    fn ipm_nb(&self, x: i32, y: i32) -> Option<u8> {
+        let (nb, bx, by) = self.locate(x, y);
+        match nb {
+            Nb::None => None,
+            Nb::Cur => Some(self.cur.ipm[by * 4 + bx]),
+            Nb::Mb(i) => {
+                let m = &self.pic.mbs[i];
+                if !m.intra && self.pps.constrained_intra_pred {
+                    None
+                } else if m.i_nxn {
+                    Some(m.ipm[by * 4 + bx])
+                } else {
+                    Some(2)
+                }
+            }
+        }
+    }
+
+    fn derive_ipm(&self, k: usize, x: usize, y: usize) -> u8 {
+        let pred = match (self.ipm_nb(x as i32 - 1, y as i32), self.ipm_nb(x as i32, y as i32 - 1)) {
+            (Some(a), Some(b)) => a.min(b),
+            _ => 2,
+        };
+        let (prev, rem) = self.rc.ipsyn[k];
+        if prev {
+            pred
+        } else if rem < pred {
+            rem
+        } else {
+            rem + 1
+        }
+    }
+
+    fn intra4_pred(&mut self, blk: usize) {
+        let (x, y) = blk_xy(blk);
+        let mode = self.derive_ipm(blk, x, y);
+        self.cur.ipm[y * 4 + x] = mode;
+        let (a_ok, b_ok, c_ok, d_ok) = (self.intra_ok(self.a), self.intra_ok(self.b), self.intra_ok(self.nb_c()), self.intra_ok(self.nb_d()));
+        let left = x > 0 || a_ok;
+        let top = y > 0 || b_ok;
+        let corner = match (x > 0, y > 0) {
+            (true, true) => true,
+            (true, false) => b_ok,
+            (false, true) => a_ok,
+            _ => d_ok,
+        };
+        let tr = if y == 0 {
+            if x < 3 {
+                b_ok
+            } else {
+                c_ok
+            }
+        } else {
+            x < 3 && xy_blk(x + 1, y - 1) < xy_blk(x, y)
+        };
+        let (px, py) = (self.rc.mbx * 16 + x * 4, self.rc.mby * 16 + y * 4);
+        let e = self.edge(0, px, py, 4, top, left, corner, tr);
+        let mut out = [0i32; 16];
+        recon::pred4x4(&e, mode, &mut out);
+        for j in 0..4 {
+            for i in 0..4 {
+                self.rc.pred[(y * 4 + j) * 16 + x * 4 + i] = out[j * 4 + i];
+            }
+        }
+    }
+
+    fn intra8_pred(&mut self, b8: usize) {
+        let (x8, y8) = (b8 & 1, b8 >> 1);
+        let mode = self.derive_ipm(b8, x8 * 2, y8 * 2);
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            self.cur.ipm[(y8 * 2 + dy) * 4 + x8 * 2 + dx] = mode;
+        }
+        let (a_ok, b_ok, c_ok, d_ok) = (self.intra_ok(self.a), self.intra_ok(self.b), self.intra_ok(self.nb_c()), self.intra_ok(self.nb_d()));
+        let left = x8 > 0 || a_ok;
+        let top = y8 > 0 || b_ok;
+        let corner = match (x8 > 0, y8 > 0) {
+            (true, true) => true,
+            (true, false) => b_ok,
+            (false, true) => a_ok,
+            _ => d_ok,
+        };
+        let tr = if y8 == 0 {
+            if x8 == 0 {
+                b_ok
+            } else {
+                c_ok
+            }
+        } else {
+            x8 == 0
+        };
+        let (px, py) = (self.rc.mbx * 16 + x8 * 8, self.rc.mby * 16 + y8 * 8);
+        let e = self.edge(0, px, py, 8, top, left, corner, tr);
+        let mut out = [0i32; 64];
+        recon::pred8x8(&e, mode, &mut out);
+        for j in 0..8 {
+            for i in 0..8 {
+                self.rc.pred[(y8 * 8 + j) * 16 + x8 * 8 + i] = out[j * 8 + i];
+            }
+        }
+    }
+
+    /// Intra16x16 luma and intra chroma predictions of the current macroblock.
+    fn intra_pred_mb(&mut self) {
+        self.rc.dis = [0; 256];
+        let (a_ok, b_ok, d_ok) = (self.intra_ok(self.a), self.intra_ok(self.b), self.intra_ok(self.nb_d()));
+        let (mbx, mby) = (self.rc.mbx, self.rc.mby);
+        if self.cur.i16 {
+            let e = self.edge(0, mbx * 16, mby * 16, 16, b_ok, a_ok, d_ok, false);
+            let mut out = [0i32; 256];
+            recon::pred16x16(&e, self.rc.i16m, &mut out);
+            self.rc.pred[..256].copy_from_slice(&out);
+        }
+        let mode = self.rc.cpm;
+        for c in 0..2 {
+            let e = self.edge(1 + c, mbx * 8, mby * 8, 8, b_ok, a_ok, d_ok, false);
+            let mut out = [0i32; 64];
+            recon::pred_chroma(&e, mode, &mut out);
+            self.rc.pred[256 + c * 64..320 + c * 64].copy_from_slice(&out);
+        }
+    }
+
+    /// Writes prediction plus residual (`None`: no residual) of an `n`x`n` luma block.
+    fn put_luma(&mut self, x: usize, y: usize, n: usize, res: Option<&[i32]>) {
+        let (px, py) = (self.rc.mbx * 16 + x, self.rc.mby * 16 + y);
+        let rc = &*self.rc;
+        let rec = self.pic.rec.as_mut().expect("reconstruction on");
+        let w = rec.cur.y.w;
+        for j in 0..n {
+            let dst = &mut rec.cur.y.d[(py + j) * w + px..][..n];
+            let pr = &rc.pred[(y + j) * 16 + x..][..n];
+            match res {
+                // Predictions are already within 0..=255.
+                None => dst.iter_mut().zip(pr).for_each(|(d, &p)| *d = p as u8),
+                Some(r) => {
+                    let r = &r[j * n..][..n];
+                    for i in 0..n {
+                        dst[i] = recon::clip1(pr[i].saturating_add(r[i]));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reconstructs luma 4x4 block (`x`, `y`) of the current macroblock from its prediction
+    /// and stored levels (`dc`: the scaled DC of Intra16x16 blocks).
+    fn recon_l4(&mut self, x: usize, y: usize, dc: Option<i32>) {
+        let coded = (self.cur.cbf >> xy_blk(x, y)) & 1 == 1;
+        if !coded && dc.is_none_or(|d| d == 0) {
+            self.put_luma(x * 4, y * 4, 4, None);
+            return;
+        }
+        let lv = if coded { self.rc.l4[y * 4 + x] } else { [0; 16] };
+        let mut res = [0i32; 16];
+        let mut d = [0i32; 16];
+        recon::dequant4(&lv, self.qp, dc, &mut d);
+        recon::idct4(&d, &mut res);
+        self.put_luma(x * 4, y * 4, 4, Some(&res));
+    }
+
+    fn recon_l8(&mut self, b8: usize) {
+        if (self.cur.cbf >> (b8 * 4)) & 1 == 0 {
+            self.put_luma((b8 & 1) * 8, (b8 >> 1) * 8, 8, None);
+            return;
+        }
+        let lv = self.rc.l8[b8];
+        let mut res = [0i32; 64];
+        let mut d = [0i32; 64];
+        recon::dequant8(&lv, self.qp, &mut d);
+        recon::idct8(&d, &mut res);
+        self.put_luma((b8 & 1) * 8, (b8 >> 1) * 8, 8, Some(&res));
+    }
+
+    /// Intra NxN macroblock without residual: every block is its prediction.
+    fn intra_nxn_luma_norez(&mut self) {
+        if self.cur.t8 {
+            for b8 in 0..4 {
+                self.intra8_pred(b8);
+                self.recon_l8(b8);
+            }
+        } else {
+            for blk in 0..16 {
+                self.intra4_pred(blk);
+                let (x, y) = blk_xy(blk);
+                self.recon_l4(x, y, None);
+            }
+        }
+        self.rc.luma_done = true;
+    }
+
+    /// Writes the rest of the macroblock into the picture and records its motion.
+    fn recon_finish(&mut self) {
+        let cbp = self.cur.cbp;
+        if !self.rc.luma_done && !self.cur.i16 && cbp & 15 == 0 {
+            self.put_luma(0, 0, 16, None);
+            self.rc.luma_done = true;
+        }
+        if !self.rc.luma_done {
+            if self.cur.i16 {
+                let mut dcs = [0i32; 16];
+                if (self.cur.cbf >> 16) & 1 == 1 {
+                    recon::luma_dc(&self.rc.dc, self.qp, &mut dcs);
+                }
+                for k in 0..16 {
+                    self.recon_l4(k % 4, k / 4, Some(dcs[k]));
+                }
+            } else if self.cur.t8 {
+                for b8 in 0..4 {
+                    self.recon_l8(b8);
+                }
+            } else {
+                for k in 0..16 {
+                    self.recon_l4(k % 4, k / 4, None);
+                }
+            }
+        }
+        // Chroma.
+        for c in 0..2 {
+            if self.rc.chroma_done {
+                break;
+            }
+            if cbp >> 4 == 0 {
+                let (cx0, cy0) = (self.rc.mbx * 8, self.rc.mby * 8);
+                let rc = &*self.rc;
+                let rec = self.pic.rec.as_mut().expect("reconstruction on");
+                let p = if c == 0 { &mut rec.cur.u } else { &mut rec.cur.v };
+                let w = p.w;
+                for j in 0..8 {
+                    let dst = &mut p.d[(cy0 + j) * w + cx0..][..8];
+                    let src = &rc.pred[256 + c * 64 + j * 8..][..8];
+                    dst.iter_mut().zip(src).for_each(|(d, &s)| *d = s as u8);
+                }
+                continue;
+            }
+            let off = if c == 0 { self.pps.chroma_qp_offset } else { self.pps.chroma_qp_offset2 };
+            let qpc = recon::chroma_qp(self.qp, off);
+            let mut dcs = [0i32; 4];
+            if (self.cur.cbf >> (17 + c)) & 1 == 1 {
+                recon::chroma_dc(&self.rc.cdc[c], qpc, &mut dcs);
+            }
+            let (cx0, cy0) = (self.rc.mbx * 8, self.rc.mby * 8);
+            for b4 in 0..4 {
+                let coded = (self.cur.cbf >> (19 + c * 4 + b4)) & 1 == 1;
+                let mut res = [0i32; 16];
+                if dcs[b4] != 0 || coded {
+                    let lv = if coded { self.rc.cac[c * 4 + b4] } else { [0; 16] };
+                    let mut d = [0i32; 16];
+                    recon::dequant4(&lv, qpc, Some(dcs[b4]), &mut d);
+                    recon::idct4(&d, &mut res);
+                }
+                let (x, y) = ((b4 & 1) * 4, (b4 >> 1) * 4);
+                let rc = &*self.rc;
+                let rec = self.pic.rec.as_mut().expect("reconstruction on");
+                let p = if c == 0 { &mut rec.cur.u } else { &mut rec.cur.v };
+                let w = p.w;
+                for j in 0..4 {
+                    for i in 0..4 {
+                        p.d[(cy0 + y + j) * w + cx0 + x + i] = recon::clip1(rc.pred[256 + c * 64 + (y + j) * 8 + x + i].saturating_add(res[j * 4 + i]));
+                    }
+                }
+            }
+        }
+        // Motion field (direct prediction in later pictures) and deblocking facts.
+        let mut nz = 0u16;
+        for k in 0..16 {
+            if self.cur.nnz[k] > 0 {
+                nz |= 1 << k;
+            }
+        }
+        let qpc = [recon::chroma_qp(self.qp, self.pps.chroma_qp_offset) as u8, recon::chroma_qp(self.qp, self.pps.chroma_qp_offset2) as u8];
+        let ri = &self.sh.ri;
+        let dbi = recon::DbInfo {
+            done: true,
+            qp: self.qp as u8,
+            qpc,
+            intra: self.cur.intra,
+            t8: self.cur.t8,
+            nz,
+            slice: self.sid,
+            idc: ri.dbk_idc.min(2) as u8,
+            off_a: ri.dbk_a.clamp(-12, 12) as i8,
+            off_b: ri.dbk_b.clamp(-12, 12) as i8,
+            uni: false,
+        };
+        let uni = !self.cur.intra
+            && nz == 0
+            && (0..2).all(|l| {
+                let r = self.cur.rf[l][0];
+                self.cur.rf[l].iter().all(|&v| v == r) && (r < 0 || self.cur.mv[l].iter().all(|&v| v == self.cur.mv[l][0]))
+            });
+        let dbi = recon::DbInfo { uni, ..dbi };
+        let rec = self.pic.rec.as_mut().expect("reconstruction on");
+        let w4 = rec.cur.w4;
+        let wmb = w4 / 4;
+        rec.cur.db[self.rc.mby * wmb + self.rc.mbx] = dbi;
+        let mut rpoc = [[0i32; 4]; 2];
+        for l in 0..2 {
+            for b8 in 0..4 {
+                let r = self.cur.rf[l][b8];
+                rpoc[l][b8] = rec.refpic(l, r as i32).map_or(i32::MIN, |p| p.poc);
+            }
+        }
+        for k in 0..16 {
+            let (x, y) = (k % 4, k / 4);
+            let b8 = (y / 2) * 2 + x / 2;
+            let pos = (self.rc.mby * 4 + y) * w4 + self.rc.mbx * 4 + x;
+            rec.cur.mf[pos] = Motion {
+                mv: [self.cur.mv[0][k], self.cur.mv[1][k]],
+                refi: [self.cur.rf[0][b8], self.cur.rf[1][b8]],
+                rpoc: [rpoc[0][b8], rpoc[1][b8]],
+            };
+        }
+    }
+
+    /// Motion of a neighbouring 4x4 block (x, y relative to the macroblock, in 4x4 units)
+    /// for list `l`: None when not available; refidx -1 when intra or the list is unused.
+    fn mv_nb(&self, l: usize, x: i32, y: i32, done: u16) -> Option<(i8, [i16; 2])> {
+        if x >= 0 && y >= 0 {
+            if x >= 4 || y >= 4 {
+                return None;
+            }
+            let k = (y * 4 + x) as usize;
+            if (done >> k) & 1 == 0 {
+                return None;
+            }
+            let r = self.cur.rf[l][(y as usize / 2) * 2 + x as usize / 2];
+            return Some((r, if r >= 0 { self.cur.mv[l][k] } else { [0, 0] }));
+        }
+        let (addr, bx, by) = if x < 0 && y < 0 {
+            (self.nb_d()?, 3, 3)
+        } else if x < 0 {
+            (self.a?, 3, y as usize)
+        } else if x < 4 {
+            (self.b?, x as usize, 3)
+        } else {
+            (self.nb_c()?, 0, 3)
+        };
+        let m = &self.pic.mbs[addr];
+        let r = m.rf[l][(by / 2) * 2 + bx / 2];
+        Some((r, if r >= 0 { m.mv[l][by * 4 + bx] } else { [0, 0] }))
+    }
+
+    /// Motion vector predictor (8.4.1.3); `dir` 1/2: 16x8 top/bottom, 3/4: 8x16 left/right.
+    #[allow(clippy::too_many_arguments)]
+    fn pred_mv(&self, l: usize, x: i32, y: i32, w: i32, refidx: i8, dir: usize, done: u16) -> [i16; 2] {
+        let na = self.mv_nb(l, x - 1, y, done);
+        let mut nb = self.mv_nb(l, x, y - 1, done);
+        let mut nc = self.mv_nb(l, x + w, y - 1, done).or_else(|| self.mv_nb(l, x - 1, y - 1, done));
+        let r = |n: Option<(i8, [i16; 2])>| n.map_or(-1, |v| v.0);
+        let mv = |n: Option<(i8, [i16; 2])>| n.map_or([0, 0], |v| v.1);
+        match dir {
+            1 if r(nb) == refidx => return mv(nb),
+            2 | 3 if r(na) == refidx => return mv(na),
+            4 if r(nc) == refidx => return mv(nc),
+            _ => {}
+        }
+        if nb.is_none() && nc.is_none() && na.is_some() {
+            nb = na;
+            nc = na;
+        }
+        let (ra, rb, rc) = (r(na), r(nb), r(nc));
+        let hits = (ra == refidx) as u32 + (rb == refidx) as u32 + (rc == refidx) as u32;
+        if hits == 1 {
+            return if ra == refidx {
+                mv(na)
+            } else if rb == refidx {
+                mv(nb)
+            } else {
+                mv(nc)
+            };
+        }
+        let (a, b, c) = (mv(na), mv(nb), mv(nc));
+        [med3(a[0], b[0], c[0]), med3(a[1], b[1], c[1])]
+    }
+
+    fn pskip_motion(&mut self) {
+        let a = self.mv_nb(0, -1, 0, 0);
+        let b = self.mv_nb(0, 0, -1, 0);
+        let zero = match (a, b) {
+            (Some(a), Some(b)) => (a.0 == 0 && a.1 == [0, 0]) || (b.0 == 0 && b.1 == [0, 0]),
+            _ => true,
+        };
+        self.cur.rf = [[0; 4], [-1; 4]];
+        self.cur.mv = [[[0; 2]; 16]; 2];
+        let mv = if zero { [0, 0] } else { self.pred_mv(0, 0, 0, 4, 0, 0, 0) };
+        self.cur.mv[0] = [mv; 16];
+    }
+
+    /// Motion of B_Skip / B_Direct_16x16 / direct 8x8 blocks (8.4.1.2).
+    fn direct_motion(&self) -> ([[i8; 4]; 2], [[[i16; 2]; 16]; 2]) {
+        let mut rf = [[-1i8; 4]; 2];
+        let mut mv = [[[0i16; 2]; 16]; 2];
+        let Some(rec) = self.pic.rec.as_ref() else { return (rf, mv) };
+        let col = rec.refpic(1, 0);
+        let (mbx, mby) = (self.rc.mbx, self.rc.mby);
+        let colmot = |x: usize, y: usize| -> (i8, [i16; 2], i32) {
+            let Some(p) = col.filter(|p| p.y.w == rec.cur.y.w && p.y.h == rec.cur.y.h) else { return (-1, [0, 0], 0) };
+            let Some(&m) = p.mf.get((mby * 4 + y) * p.w4 + mbx * 4 + x) else { return (-1, [0, 0], 0) };
+            if m.refi[0] >= 0 {
+                (m.refi[0], m.mv[0], m.rpoc[0])
+            } else if m.refi[1] >= 0 {
+                (m.refi[1], m.mv[1], m.rpoc[1])
+            } else {
+                (-1, [0, 0], 0)
+            }
+        };
+        let inf = self.sps.direct_8x8_inference;
+        let cpos = |k: usize| -> (usize, usize) {
+            let (x, y) = (k % 4, k / 4);
+            if inf {
+                ((x / 2) * 3, (y / 2) * 3)
+            } else {
+                (x, y)
+            }
+        };
+        if self.sh.direct_spatial {
+            let mut r = [-1i8; 2];
+            for (l, rl) in r.iter_mut().enumerate() {
+                let a = self.mv_nb(l, -1, 0, 0).map_or(-1, |v| v.0);
+                let b = self.mv_nb(l, 0, -1, 0).map_or(-1, |v| v.0);
+                let c = self.mv_nb(l, 4, -1, 0).or_else(|| self.mv_nb(l, -1, -1, 0)).map_or(-1, |v| v.0);
+                *rl = minpos(a, minpos(b, c));
+            }
+            let zero = r[0] < 0 && r[1] < 0;
+            if zero {
+                r = [0, 0];
+            }
+            let mvp = [0, 1].map(|l| if !zero && r[l] >= 0 { self.pred_mv(l, 0, 0, 4, r[l], 0, 0) } else { [0, 0] });
+            let lt = col.is_none_or(|p| p.long_term);
+            for k in 0..16 {
+                let (cx, cy) = cpos(k);
+                let (ri, cmv, _) = colmot(cx, cy);
+                let colzero = !lt && ri == 0 && cmv[0].abs() <= 1 && cmv[1].abs() <= 1;
+                for l in 0..2 {
+                    if r[l] >= 0 && !(zero || (r[l] == 0 && colzero)) {
+                        mv[l][k] = mvp[l];
+                    }
+                }
+            }
+            rf = [[r[0]; 4], [r[1]; 4]];
+        } else {
+            // Temporal direct.
+            let p1poc = col.map_or(0, |p| p.poc);
+            for k in 0..16 {
+                let (x, y) = (k % 4, k / 4);
+                let b8 = (y / 2) * 2 + x / 2;
+                let (cx, cy) = cpos(k);
+                let (ri, cmv, rpoc) = colmot(cx, cy);
+                let r0 = if ri < 0 {
+                    0
+                } else {
+                    rec.list[0].iter().position(|&i| i != usize::MAX && rec.dpb[i].poc == rpoc).unwrap_or(0) as i8
+                };
+                rf[0][b8] = r0;
+                rf[1][b8] = 0;
+                let p0 = rec.refpic(0, r0 as i32);
+                let p0poc = p0.map_or(0, |p| p.poc);
+                let tb = (rec.cur.poc - p0poc).clamp(-128, 127);
+                let td = (p1poc - p0poc).clamp(-128, 127);
+                if td == 0 || p0.is_none_or(|p| p.long_term) {
+                    mv[0][k] = cmv;
+                } else {
+                    let tx = (16384 + (td / 2).abs()) / td;
+                    let dsf = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+                    let m0 = [((dsf * cmv[0] as i32 + 128) >> 8) as i16, ((dsf * cmv[1] as i32 + 128) >> 8) as i16];
+                    mv[0][k] = m0;
+                    mv[1][k] = [m0[0].wrapping_sub(cmv[0]), m0[1].wrapping_sub(cmv[1])];
+                }
+            }
+        }
+        (rf, mv)
+    }
+
+    fn set_motion(&mut self, l: usize, x: usize, y: usize, w: usize, h: usize, mv: [i16; 2]) {
+        for yy in y..y + h {
+            for xx in x..x + w {
+                self.cur.mv[l][yy * 4 + xx] = mv;
+            }
+        }
+    }
+
+    /// Inter prediction of the current macroblock from its motion.
+    fn inter_pred(&mut self) {
+        let Some(rec) = self.pic.rec.as_ref() else { return };
+        let rc = &mut *self.rc;
+        let (mbx, mby) = (rc.mbx, rc.mby);
+        let implicit = self.pps.weighted_bipred_idc == 2 && self.sh.slice_type == B;
+        let explicit = self.sh.ri.explicit_wp;
+        // Every sample of both buffers is written below (the groups cover the macroblock).
+        let (out, dis) = (&mut rc.pred, &mut rc.dis);
+        // Blocks with the same motion are predicted together (the samples do not depend on
+        // the block size).
+        let b8 = |k: usize| ((k / 4) / 2) * 2 + (k % 4) / 2;
+        let same = |a: usize, b: usize| -> bool {
+            (0..2).all(|l| {
+                let (ra, rb) = (self.cur.rf[l][b8(a)], self.cur.rf[l][b8(b)]);
+                ra == rb && (ra < 0 || self.cur.mv[l][a] == self.cur.mv[l][b])
+            })
+        };
+        let mut groups = [(0usize, 0usize, 0usize); 16];
+        let mut ng = 0;
+        if (1..16).all(|k| same(0, k)) {
+            groups[0] = (0, 0, 4);
+            ng = 1;
+        } else {
+            for q in 0..4 {
+                let (x0, y0) = ((q & 1) * 2, (q >> 1) * 2);
+                let k0 = y0 * 4 + x0;
+                if [k0 + 1, k0 + 4, k0 + 5].iter().all(|&k| same(k0, k)) {
+                    groups[ng] = (x0, y0, 2);
+                    ng += 1;
+                } else {
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        groups[ng] = (x0 + dx, y0 + dy, 1);
+                        ng += 1;
+                    }
+                }
+            }
+        }
+        for &(x, y, n) in &groups[..ng] {
+            let k = y * 4 + x;
+            let b8 = b8(k);
+            let (lw, cw) = (n * 4, n * 2);
+            let (pl, pc, sc) = (&mut rc.pl, &mut rc.pc, &mut rc.mc);
+            let mut used = [false; 2];
+            let mut pocs = [0i32; 2];
+            let mut lts = [false; 2];
+            for l in 0..2 {
+                let r = self.cur.rf[l][b8];
+                if r < 0 {
+                    continue;
+                }
+                used[l] = true;
+                let mv = self.cur.mv[l][k];
+                let (mvx, mvy) = (mv[0] as i32, mv[1] as i32);
+                match rec.refpic(l, r as i32) {
+                    Some(p) => {
+                        pocs[l] = p.poc;
+                        lts[l] = p.long_term;
+                        let (px, py) = ((mbx * 16 + x * 4) as i32, (mby * 16 + y * 4) as i32);
+                        recon::mc_luma(sc, &p.y, px, py, mvx, mvy, lw, lw, &mut pl[l], 16);
+                        let (cx, cy) = ((mbx * 8 + x * 2) as i32, (mby * 8 + y * 2) as i32);
+                        recon::mc_chroma(&p.u, cx, cy, mvx, mvy, cw, cw, &mut pc[l][0], 8);
+                        recon::mc_chroma(&p.v, cx, cy, mvx, mvy, cw, cw, &mut pc[l][1], 8);
+                    }
+                    None => {
+                        pl[l] = [128; 256];
+                        pc[l] = [[128; 64]; 2];
+                    }
+                }
+            }
+            let (w0, w1) = if implicit && used[0] && used[1] {
+                let tb = (rec.cur.poc - pocs[0]).clamp(-128, 127);
+                let td = (pocs[1] - pocs[0]).clamp(-128, 127);
+                if td == 0 || lts[0] || lts[1] {
+                    (32, 32)
+                } else {
+                    let tx = (16384 + (td / 2).abs()) / td;
+                    let dsf = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+                    if !(-64..=128).contains(&(dsf >> 2)) {
+                        (32, 32)
+                    } else {
+                        (64 - (dsf >> 2), dsf >> 2)
+                    }
+                }
+            } else {
+                (32, 32)
+            };
+            // How the two predictions combine, decided once per block (8.4.2.3): per component
+            // (Y, Cb, Cr) the weights, offsets and log2 denominator, or the default average.
+            let bi = used[0] && used[1];
+            let ri = &self.sh.ri;
+            let wts = |c: usize| -> [i32; 5] {
+                let ld = ri.wp_denom[(c > 0) as usize] as i32;
+                let ew = |l: usize| -> (i32, i32) {
+                    let r = self.cur.rf[l][b8];
+                    ri.wp[l].get(r.max(0) as usize).map_or((1 << ld, 0), |w| w[c])
+                };
+                let ((wa, oa), (wb, ob)) = (ew(0), ew(1));
+                [wa, oa, wb, ob, ld]
+            };
+            // Writes `n`x`n` combined samples from `a`/`b` (stride `sa`) to `dst` (stride `sd`).
+            #[inline(always)]
+            #[allow(clippy::too_many_arguments)]
+            fn rows(dst: &mut [i32], sd: usize, a: &[i32], b: &[i32], sa: usize, n: usize, f: impl Fn(i32, i32) -> i32) {
+                for j in 0..n {
+                    let (ra, rb) = (&a[j * sa..j * sa + n], &b[j * sa..j * sa + n]);
+                    for (i, o) in dst[j * sd..j * sd + n].iter_mut().enumerate() {
+                        *o = f(ra[i], rb[i]);
+                    }
+                }
+            }
+            let combine = |dst: &mut [i32], sd: usize, a: &[i32], b: &[i32], sa: usize, n: usize, c: usize| {
+                if explicit {
+                    let [wa, oa, wb, ob, ld] = wts(c);
+                    match (used[0], used[1]) {
+                        (true, true) => rows(dst, sd, a, b, sa, n, |p, q| recon::clip1(((p * wa + q * wb + (1 << ld)) >> (ld + 1)) + ((oa + ob + 1) >> 1)) as i32),
+                        (true, false) | (false, true) => {
+                            let (w, o, first) = if used[0] { (wa, oa, true) } else { (wb, ob, false) };
+                            if ld >= 1 {
+                                rows(dst, sd, a, b, sa, n, |p, q| recon::clip1(((if first { p } else { q } * w + (1 << (ld - 1))) >> ld) + o) as i32)
+                            } else {
+                                rows(dst, sd, a, b, sa, n, |p, q| recon::clip1(if first { p } else { q } * w + o) as i32)
+                            }
+                        }
+                        _ => rows(dst, sd, a, b, sa, n, |_, _| 128),
+                    }
+                } else {
+                    match (used[0], used[1]) {
+                        (true, true) if implicit => rows(dst, sd, a, b, sa, n, |p, q| recon::clip1((p * w0 + q * w1 + 32) >> 6) as i32),
+                        (true, true) => {
+                            for j in 0..n {
+                                let (ra, rb) = (&a[j * sa..j * sa + n], &b[j * sa..j * sa + n]);
+                                for (i, o) in dst[j * sd..j * sd + n].iter_mut().enumerate() {
+                                    *o = (ra[i] + rb[i] + 1) >> 1;
+                                }
+                            }
+                        }
+                        (true, false) => {
+                            for j in 0..n {
+                                dst[j * sd..j * sd + n].copy_from_slice(&a[j * sa..j * sa + n]);
+                            }
+                        }
+                        (false, true) => {
+                            for j in 0..n {
+                                dst[j * sd..j * sd + n].copy_from_slice(&b[j * sa..j * sa + n]);
+                            }
+                        }
+                        _ => {
+                            for j in 0..n {
+                                dst[j * sd..j * sd + n].fill(128);
+                            }
+                        }
+                    }
+                }
+            };
+            let o = (y * 4) * 16 + x * 4;
+            combine(&mut out[o..], 16, &pl[0], &pl[1], 16, lw, 0);
+            for j in 0..lw {
+                let row = &mut dis[o + j * 16..o + j * 16 + lw];
+                if bi {
+                    let (ra, rb) = (&pl[0][j * 16..j * 16 + lw], &pl[1][j * 16..j * 16 + lw]);
+                    for (i, d) in row.iter_mut().enumerate() {
+                        *d = ra[i] - rb[i];
+                    }
+                } else {
+                    row.fill(0);
+                }
+            }
+            for c in 0..2 {
+                let o = 256 + c * 64 + (y * 2) * 8 + x * 2;
+                combine(&mut out[o..], 8, &pc[0][c], &pc[1][c], 8, cw, 1 + c);
+            }
+        }
     }
 
     /// Slice type, intra flag and QP bucket, as extra model context.
@@ -1405,11 +2908,32 @@ impl<'a> SliceParser<'a> {
         let cat_h = (cat as u32) << 8;
         let ex = self.extra();
         let nbh = nc | q(colo, 63) << 6;
+        let on = self.rc.on;
+        let feat = self.rc.feat;
+        let frem = self.rc.frem;
+        let ftex = self.rc.ftex;
+        let bok = if self.rc.on && (cat == 1 || cat == 2 || cat == 5) { self.rc.bnd_ok } else { 0 };
+        let n8 = cat == 5;
+        let mut bnd = self.rc.bnd;
+        let bqp = self.rc.bqp;
+        let fdis = self.rc.fdis;
+        let fd = |i: usize| -> u32 { if (cat == 1 || cat == 2) && i < 16 { fdis[i] as u32 } else { 0 } };
+        if self.rc.on {
+            self.rc.cx = [0; 64];
+        }
         // Hints of the significance-map bins (with `n` coefficients found so far, or including
         // the one at `i` for last_significant_coeff_flag) and of the first level bin of a
         // coefficient. Besides coding, they announce the possible next bins to the model.
         let _ = sig;
-        let sig_h = |i: usize, n: usize| sig_hint(cat, i, n, nbh, ex, la[i + off], lb[i + off], rem_a[i], rem_b[i]);
+        let sig_h = |i: usize, n: usize| {
+            let mut h = sig_hint(cat, i, n, nbh, ex, la[i + off], lb[i + off], rem_a[i], rem_b[i]);
+            if on {
+                h.a |= (feat[i + off] as u32) << 16;
+                h.c |= fd(i + off) << 12;
+                h.d |= ftex << 24;
+            }
+            h
+        };
         let last_h = |i: usize, n: usize| -> Hint {
             let li = if cat == 5 {
                 LAST_8X8[i] as usize
@@ -1420,27 +2944,35 @@ impl<'a> SliceParser<'a> {
             };
             let nbi = lvq(la[i + off], 3) | lvq(lb[i + off], 3) << 2;
             let after = rem_a[i + 1] as u32 + rem_b[i + 1] as u32;
-            Hint {
+            let mut h = Hint {
                 ctx: (last + li) as u16,
                 kind: kind::LAST,
                 a: cat_h | i as u32,
                 b: nbh | q(n as u32, 15) << 12,
                 c: nbi | ((rem_a[i + 1] > 0) as u32) << 4 | ((rem_b[i + 1] > 0) as u32) << 5,
                 d: q(after, 15) | q(n as u32, 15) << 4 | ex << 8,
+            };
+            if on {
+                h.a |= (frem[i + off + 1] as u32) << 16;
             }
+            h
         };
         #[allow(clippy::too_many_arguments)]
         let lvl_h = |p: usize, k: usize, n: usize, prev: u32, maxv: u32, gt1: usize, eq1: usize| -> Hint {
             let inc0 = if gt1 != 0 { 0 } else { (1 + eq1).min(4) };
             let (va, vb) = (la[p + off], lb[p + off]);
-            Hint {
+            let mut h = Hint {
                 ctx: (abs + inc0) as u16,
                 kind: kind::ABS,
                 a: cat_h | p as u32,
                 b: q(prev, 15) | (q(k as u32, 15)) << 4 | q(nc, 17) << 8 | (q(n as u32, 31)) << 13,
                 c: lvq(va, 15) | lvq(vb, 15) << 4 | q(prev, 15) << 8,
                 d: q(maxv, 15) | q(gt1 as u32, 7) << 4 | q(eq1 as u32, 7) << 7 | ex << 10,
+            };
+            if on {
+                h.d |= (feat[p + off] as u32) << 24;
             }
+            h
         };
         // The bin after the map when it ends with `n` coefficients, the last one at `p`.
         let first_lvl = |n: usize, p: usize| lvl_h(p, n - 1, n, 0, 0, 0, 0);
@@ -1475,13 +3007,42 @@ impl<'a> SliceParser<'a> {
             let h0 = lvl_h(p, k, n, prev, maxv, gt1, eq1);
             let (va, vb) = (la[p + off], lb[p + off]);
             let inc1 = 5 + gt1.min(4 - (cat == 3) as usize);
-            let sign_h = |v: u32| Hint {
-                ctx: 0,
-                kind: kind::SIGN,
-                a: cat as u32,
-                b: q(v, 3) | (p as u32) << 2,
-                c: sgn(va) | sgn(vb) << 2,
-                d: prev_sign | (p as u32) << 2,
+            // Boundary sign prediction: the sign whose basis function reduces the mismatch.
+            let r4 = if n8 { recon::ZZ8[p] as usize } else { recon::ZZ4[(p + off).min(15)] as usize };
+            let proj = if bok == 0 {
+                0
+            } else if n8 {
+                bproj8(&bnd, bok, r4)
+            } else {
+                bproj(&bnd, bok, r4)
+            };
+            let sp = |v: u32| -> u32 {
+                if bok == 0 {
+                    return 0;
+                }
+                let (d, sh) = if n8 { (deq8(v as i32 + 1, bqp, r4) as u64, 25) } else { (deq1(v as i32 + 1, bqp, r4) as u64, 14) };
+                let conf = bucket(((proj.unsigned_abs() * d) >> sh).min(1 << 30) as u32) as u32;
+                if conf == 0 {
+                    1
+                } else {
+                    2 + (proj > 0) as u32 + 2 * (conf - 1)
+                }
+            };
+            let sign_h = |v: u32| {
+                let mut h = Hint {
+                    ctx: 0,
+                    kind: kind::SIGN,
+                    a: cat as u32,
+                    b: q(v, 3) | (p as u32) << 2,
+                    c: sgn(va) | sgn(vb) << 2,
+                    d: prev_sign | (p as u32) << 2,
+                };
+                let x = sp(v);
+                if x != 0 {
+                    h.a |= x << 8;
+                    h.c |= x << 4;
+                }
+                h
             };
             let hs = lvq(va, 63) | lvq(vb, 63) << 6;
             let suf0 = Hint { ctx: 0, kind: kind::ABS_SUF, a: 0, b: q(maxv, 63), c: hs, d: 0 };
@@ -1547,6 +3108,30 @@ impl<'a> SliceParser<'a> {
             prev_sign = 1 + s;
             let mag = (v + 1).min(127) as i8;
             out[p + off] = if s == 1 { -mag } else { mag };
+            if self.rc.on {
+                // Conforming streams stay far inside this range; the clamp keeps the
+                // reconstruction arithmetic of corrupt ones in range.
+                let lv = (v + 1).min(1 << 15) as i32;
+                self.rc.cx[p + off] = if s == 1 { -lv } else { lv };
+                if bok != 0 {
+                    let sv = if s == 1 { -lv } else { lv };
+                    if n8 {
+                        let d = deq8(sv, bqp, r4);
+                        let (u, vv) = (r4 & 7, r4 >> 3);
+                        for x in 0..8 {
+                            bnd[x] = bnd[x].wrapping_add(d.wrapping_mul(recon::C8[x][u] * recon::C8[0][vv]));
+                            bnd[8 + x] = bnd[8 + x].wrapping_add(d.wrapping_mul(recon::C8[0][u] * recon::C8[x][vv]));
+                        }
+                    } else {
+                        let d = deq1(sv, bqp, r4);
+                        let (u, vv) = (r4 & 3, r4 >> 2);
+                        for x in 0..4 {
+                            bnd[x] = bnd[x].wrapping_add(d.wrapping_mul(CI2[x][u]));
+                            bnd[8 + x] = bnd[8 + x].wrapping_add(d.wrapping_mul(CI2[x][vv]));
+                        }
+                    }
+                }
+            }
         }
         Ok(n.min(255) as u8)
     }

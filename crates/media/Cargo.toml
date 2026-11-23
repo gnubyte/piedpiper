@@ -10,6 +10,11 @@ publish = false
 
 [dependencies]
 
+[features]
+# Development aids of the H.264 picture reconstruction: picture dumps and hashes for checks
+# against a reference decoder (environment variables PPM_DUMP, PPM_HASH; see h264::recon).
+recon-debug = []
+
 [[bin]]
 name = "ppmedia"
 path = "src/main.rs"

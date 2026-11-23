@@ -85,9 +85,9 @@
     "compressed": "h264-mp4.bin.pp",
     "flags": "",
     "input_sha256": "123852659c8d7d845380297aa1817f4b0a131f05da663e4f37d9970045653241",
-    "compressed_sha256": "f5c8edd1524142551d49a14e1b7956d2261ba75e3722cf99ce2d39d744b1c151",
+    "compressed_sha256": "95b9187d221c0674bca7817490673117004a06206aef5c6b4e4f2f378f45aa68",
     "input_size": 18758,
-    "compressed_size": 13337
+    "compressed_size": 13546
   },
   {
     "name": "h264-cavlc-mp4",

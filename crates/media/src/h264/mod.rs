@@ -3,6 +3,7 @@
 pub mod cabac;
 pub mod cavlc;
 pub mod mb;
+pub mod recon;
 pub mod tables;
 
 use crate::bits::{Bad, BitReader, R};
@@ -30,6 +31,7 @@ pub struct Sps {
     pub direct_8x8_inference: bool,
     pub width_mbs: u32,
     pub height_map_units: u32,
+    pub max_num_ref_frames: u32,
 }
 
 impl Sps {
@@ -73,6 +75,8 @@ pub struct Pps {
     pub constrained_intra_pred: bool,
     pub redundant_pic_cnt_present: bool,
     pub transform_8x8_mode: bool,
+    pub chroma_qp_offset: i32,
+    pub chroma_qp_offset2: i32,
 }
 
 fn skip_scaling_list(r: &mut BitReader, size: usize) -> R<()> {
@@ -140,7 +144,7 @@ pub fn parse_sps(rbsp: &[u8]) -> R<Sps> {
     if s.log2_max_frame_num > 16 || s.log2_max_poc_lsb > 16 {
         return Err(Bad);
     }
-    r.ue()?; // max_num_ref_frames
+    s.max_num_ref_frames = r.ue()?;
     r.flag()?; // gaps_in_frame_num_value_allowed_flag
     s.width_mbs = r.ue()? + 1;
     s.height_map_units = r.ue()? + 1;
@@ -173,12 +177,29 @@ pub fn parse_pps(rbsp: &[u8]) -> R<Pps> {
     p.weighted_bipred_idc = r.u(2)?;
     p.pic_init_qp = 26 + r.se()?;
     r.se()?; // pic_init_qs_minus26
-    r.se()?; // chroma_qp_index_offset
+    p.chroma_qp_offset = r.se()?;
+    p.chroma_qp_offset2 = p.chroma_qp_offset;
     p.deblocking_filter_control_present = r.flag()?;
     p.constrained_intra_pred = r.flag()?;
     p.redundant_pic_cnt_present = r.flag()?;
     if r.more_rbsp_data() {
         p.transform_8x8_mode = r.flag()?;
+        // Only reconstruction (model context) uses what follows, so errors are ignored.
+        let t8 = p.transform_8x8_mode;
+        let mut rest = || -> R<i32> {
+            if r.flag()? {
+                let n = 6 + if t8 { 2 } else { 0 };
+                for i in 0..n {
+                    if r.flag()? {
+                        skip_scaling_list(&mut r, if i < 6 { 16 } else { 64 })?;
+                    }
+                }
+            }
+            r.se()
+        };
+        if let Ok(v) = rest() {
+            p.chroma_qp_offset2 = v;
+        }
     }
     Ok(p)
 }
@@ -199,14 +220,16 @@ pub struct SliceHeader {
     /// Bit offset of slice_data() in the RBSP (CABAC streams align it to a byte after
     /// this; CAVLC data starts right here).
     pub data_bit: usize,
+    /// Fields only picture reconstruction uses.
+    pub ri: recon::RefInfo,
 }
 
-fn ref_pic_list_modification(r: &mut BitReader) -> R<()> {
+fn ref_pic_list_modification(r: &mut BitReader, mods: &mut Vec<recon::ListMod>) -> R<()> {
     if r.flag()? {
         for _ in 0..100 {
             match r.ue()? {
-                0..=2 => {
-                    r.ue()?;
+                v @ 0..=2 => {
+                    mods.push((v, r.ue()?));
                 }
                 3 => return Ok(()),
                 _ => return Err(Bad),
@@ -217,46 +240,54 @@ fn ref_pic_list_modification(r: &mut BitReader) -> R<()> {
     Ok(())
 }
 
-fn pred_weight_table(r: &mut BitReader, sps: &Sps, slice_type: u32, n0: u32, n1: u32) -> R<()> {
-    r.ue()?;
+fn pred_weight_table(r: &mut BitReader, sps: &Sps, slice_type: u32, n0: u32, n1: u32, ri: &mut recon::RefInfo) -> R<()> {
+    let ld = r.ue()?;
     let chroma = sps.chroma_array_type() != 0;
-    if chroma {
-        r.ue()?;
+    let cd = if chroma { r.ue()? } else { 0 };
+    if ld > 7 || cd > 7 {
+        return Err(Bad);
     }
+    ri.wp_denom = [ld, cd];
     let lists = if slice_type == B { 2 } else { 1 };
     for list in 0..lists {
         let n = if list == 0 { n0 } else { n1 };
         for _ in 0..n {
+            let mut w = [(1 << ld, 0), (1 << cd, 0), (1 << cd, 0)];
+            // Weights and offsets are -128..=127 in conforming streams.
+            let wo = |r: &mut BitReader| -> R<(i32, i32)> { Ok((r.se()?.clamp(-128, 127), r.se()?.clamp(-128, 127))) };
             if r.flag()? {
-                r.se()?;
-                r.se()?;
+                w[0] = wo(r)?;
             }
             if chroma && r.flag()? {
-                for _ in 0..4 {
-                    r.se()?;
+                for c in 1..3 {
+                    w[c] = wo(r)?;
                 }
             }
+            ri.wp[list].push(w);
         }
     }
     Ok(())
 }
 
-fn dec_ref_pic_marking(r: &mut BitReader, idr: bool) -> R<()> {
+fn dec_ref_pic_marking(r: &mut BitReader, idr: bool, ri: &mut recon::RefInfo) -> R<()> {
     if idr {
         r.flag()?;
-        r.flag()?;
+        ri.long_term_reference = r.flag()?;
     } else if r.flag()? {
+        ri.adaptive = true;
         for _ in 0..100 {
             match r.ue()? {
                 0 => return Ok(()),
-                1 | 2 | 4 | 6 => {
-                    r.ue()?;
+                op @ (1 | 2 | 4 | 6) => {
+                    let a = r.ue()?;
+                    ri.mmco.push((op, a, 0));
                 }
                 3 => {
-                    r.ue()?;
-                    r.ue()?;
+                    let a = r.ue()?;
+                    let b = r.ue()?;
+                    ri.mmco.push((3, a, b));
                 }
-                5 => {}
+                5 => ri.mmco.push((5, 0, 0)),
                 _ => return Err(Bad),
             }
         }
@@ -326,10 +357,11 @@ impl ParamSets {
         if idr {
             r.ue()?;
         }
+        let mut ri = recon::RefInfo::default();
         if sps.poc_type == 0 {
-            r.u(sps.log2_max_poc_lsb)?;
+            ri.poc_lsb = r.u(sps.log2_max_poc_lsb)?;
             if pps.bottom_field_pic_order_in_frame_present {
-                r.se()?;
+                ri.delta_poc_bottom = r.se()?;
             }
         }
         if sps.poc_type == 1 && !sps.delta_pic_order_always_zero {
@@ -356,16 +388,17 @@ impl ParamSets {
             return Err(Bad);
         }
         if slice_type != I {
-            ref_pic_list_modification(&mut r)?;
+            ref_pic_list_modification(&mut r, &mut ri.mods[0])?;
         }
         if slice_type == B {
-            ref_pic_list_modification(&mut r)?;
+            ref_pic_list_modification(&mut r, &mut ri.mods[1])?;
         }
         if (pps.weighted_pred && slice_type == P) || (pps.weighted_bipred_idc == 1 && slice_type == B) {
-            pred_weight_table(&mut r, sps, slice_type, n0, n1)?;
+            pred_weight_table(&mut r, sps, slice_type, n0, n1, &mut ri)?;
+            ri.explicit_wp = true;
         }
         if nal_ref_idc != 0 {
-            dec_ref_pic_marking(&mut r, idr)?;
+            dec_ref_pic_marking(&mut r, idr, &mut ri)?;
         }
         let mut cabac_init_idc = 0;
         if pps.cabac && slice_type != I {
@@ -375,9 +408,12 @@ impl ParamSets {
             }
         }
         let qp_delta = r.se()?;
-        if pps.deblocking_filter_control_present && r.ue()? != 1 {
-            r.se()?;
-            r.se()?;
+        if pps.deblocking_filter_control_present {
+            ri.dbk_idc = r.ue()?;
+            if ri.dbk_idc != 1 {
+                ri.dbk_a = 2 * r.se()?;
+                ri.dbk_b = 2 * r.se()?;
+            }
         }
         let slice_qp = pps.pic_init_qp + qp_delta;
         if !(0..=51).contains(&slice_qp) {
@@ -396,6 +432,7 @@ impl ParamSets {
             slice_qp,
             direct_spatial,
             data_bit: r.pos(),
+            ri,
         };
         Ok((hdr, sps, pps))
     }

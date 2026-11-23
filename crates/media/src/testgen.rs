@@ -630,6 +630,43 @@ mod tests {
     }
 
     #[test]
+    fn cabac_damaged_slices_stay_exact() {
+        // Damaged CABAC slices are stored raw while the pictures around them are rebuilt for
+        // the model; both sides must give the macroblocks of such slices the same content.
+        let clean = synthetic_mp4(11, 12, 6, 4);
+        let mut raw_seen = false;
+        for k in 0..12u64 {
+            let mut file = clean.clone();
+            let mut x = k.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x2545_F491_4F6C_DD1D;
+            for _ in 0..2 {
+                x ^= x >> 29;
+                x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                let pos = 1600 + (x as usize % (file.len() / 2));
+                file[pos] ^= 1 << (x >> 61);
+            }
+            if let Some((packed, st)) = crate::compress(&file) {
+                raw_seen |= st.recoded < st.slices;
+                assert_eq!(crate::decompress(&packed).unwrap(), file, "damage pattern {k}");
+            }
+        }
+        assert!(raw_seen, "no damage pattern made a slice raw");
+    }
+
+    #[test]
+    fn stream_version_follows_entropy_coding() {
+        let cabac = synthetic_mp4(12, 5, 3, 2);
+        let (packed, _) = crate::compress(&cabac).unwrap();
+        assert_eq!(&packed[..4], crate::MAGIC4, "CABAC streams use the decoded pictures");
+        let opts = crate::Options { no_pixels: true, ..Default::default() };
+        let (old, _) = crate::compress_with(&cabac, &opts, &mut |_, _| true).unwrap().unwrap();
+        assert_eq!(&old[..4], crate::MAGIC);
+        assert_eq!(crate::decompress(&old).unwrap(), cabac);
+        let cavlc = synthetic_mp4_cavlc(13, 5, 3, 2, true);
+        let (packed, _) = crate::compress(&cavlc).unwrap();
+        assert_eq!(&packed[..4], crate::MAGIC, "CAVLC streams keep the older layout");
+    }
+
+    #[test]
     fn synthetic_roundtrip() {
         for (seed, frames, w, h) in [(1u64, 6usize, 4u32, 3u32), (2, 9, 7, 5), (3, 3, 1, 1), (4, 12, 11, 2)] {
             let file = synthetic_mp4(seed, frames, w, h);
@@ -671,6 +708,17 @@ mod tests {
         assert_eq!((packed.len(), crc32(&packed)), PINNED_OUTPUT, "compressed output changed");
     }
 
+    /// The older `PPM3` layout (no decoded pictures) must not change either: files written
+    /// by earlier releases are decoded with it.
+    #[test]
+    fn ppm3_output_is_pinned() {
+        let file = synthetic_mp4(7, 8, 6, 4);
+        let opts = crate::Options { no_pixels: true, ..Default::default() };
+        let (packed, _) = crate::compress_with(&file, &opts, &mut |_, _| true).unwrap().unwrap();
+        assert_eq!((packed.len(), crc32(&packed)), PINNED_OUTPUT_PPM3, "PPM3 output changed");
+    }
+
     const PINNED_INPUT: (usize, u32) = (3342, 1160179443);
-    const PINNED_OUTPUT: (usize, u32) = (1407, 1290394572);
+    const PINNED_OUTPUT: (usize, u32) = (1417, 1144486891);
+    const PINNED_OUTPUT_PPM3: (usize, u32) = (1407, 1290394572);
 }

@@ -38,6 +38,7 @@ fn main() {
                     stats: std::env::var_os("PPM_KINDS").is_some(),
                     table_bits: std::env::var("PPM_BITS").ok().and_then(|v| v.parse().ok()),
                     threads: std::env::var("PPM_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    no_pixels: std::env::var_os("PPM_NOPIX").is_some(),
                 };
                 let Some((packed, st)) = piedpiper_media::compress_with(&data, &opts, &mut |_, _| true).ok().flatten() else {
                     println!("{path}: not an H.264/HEVC MP4 this tool handles");
@@ -114,6 +115,7 @@ fn main() {
                 if !fails.is_empty() {
                     println!("    stored raw: {}", fails.join(", "));
                 }
+
             }
             if !ok {
                 std::process::exit(1);
@@ -130,6 +132,38 @@ fn main() {
             for line in lines {
                 println!("{line}");
             }
+        }
+        "aus" if args.len() >= 3 => {
+            // Development aid: the H.264 track's samples as Annex B access units, each
+            // preceded by its length (u32 LE); parameter sets go in front of the first.
+            let data = std::fs::read(&args[1]).expect("read");
+            let limit: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+            let t = piedpiper_media::mp4::find_avc_track(&data).expect("H.264 track");
+            let mut out = Vec::new();
+            for (i, &(o, sz)) in t.samples.iter().take(limit).enumerate() {
+                let smp = &data[o as usize..o as usize + sz as usize];
+                let mut au = Vec::new();
+                if i == 0 {
+                    for n in &t.param_nals {
+                        au.extend_from_slice(&[0, 0, 0, 1]);
+                        au.extend_from_slice(n);
+                    }
+                }
+                let mut p = 0;
+                while p + t.nal_len_size <= smp.len() {
+                    let mut l = 0usize;
+                    for k in 0..t.nal_len_size {
+                        l = l << 8 | smp[p + k] as usize;
+                    }
+                    p += t.nal_len_size;
+                    au.extend_from_slice(&[0, 0, 0, 1]);
+                    au.extend_from_slice(&smp[p..p + l]);
+                    p += l;
+                }
+                out.extend_from_slice(&(au.len() as u32).to_le_bytes());
+                out.extend_from_slice(&au);
+            }
+            std::fs::write(&args[2], out).expect("write");
         }
         "mkv" if args.len() == 3 => {
             // Remux an H.264 MP4 into Matroska (test input).

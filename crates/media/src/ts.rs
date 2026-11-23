@@ -15,8 +15,8 @@
 //! Layout: magic `PPTS`, the length of the side stream (varint), the side stream (file
 //! length, video PID plus 8192 for 192-byte packets, skeleton bytes, bytes before the first
 //! start code, number of NAL units and each unit's extra leading zeros, zero bytes at the end,
-//! and for 192-byte packets their 4-byte headers as differences), then a `PPM3` (H.264) or
-//! `PPH3` (HEVC) stream of the units.
+//! and for 192-byte packets their 4-byte headers as differences), then a `PPM3`/`PPM4` (H.264)
+//! or `PPH3` (HEVC) stream of the units.
 
 use crate::bits::{Bad, R};
 use crate::container::{compress_track, decompress_track, Cancelled, Codec, Options, Progress, Stats};

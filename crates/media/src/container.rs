@@ -1,6 +1,6 @@
 //! The recompressed format and the compress/decompress drivers.
 //!
-//! Layout: the 4-byte magic `PPM3` (H.264) or `PPH3` (HEVC), then a header stream (varint length + arithmetic-coded
+//! Layout: the 4-byte magic `PPM3` or `PPM4` (H.264) or `PPH3` (HEVC), then a header stream (varint length + arithmetic-coded
 //! data) holding the file length, NAL length-field size, video sample table, segment
 //! boundaries and every byte that is not part of a video sample (container boxes, audio).
 //! Runs of such bytes of 512 or more that look random (compressed audio) are flagged and
@@ -15,6 +15,10 @@
 //! Segments are runs of about 3 MB of video, chosen from the content alone. Each has its own
 //! model, so they are coded and decoded in parallel without the thread count affecting the
 //! output.
+//!
+//! `PPM4` streams (H.264 with CABAC) also rebuild the decoded pictures on both sides and give
+//! the model what they show (`h264::recon`); their segments start at key frames so that every
+//! segment has its reference pictures.
 //!
 //! A slice is recoded only after re-encoding its bins with CABAC has reproduced the original
 //! payload bit for bit; anything else is stored as raw bytes. Decompression therefore always
@@ -33,6 +37,9 @@ use crate::model::{
 use crate::mp4;
 
 pub const MAGIC: &[u8; 4] = b"PPM3";
+/// Magic of H.264 streams whose model also uses the decoded pictures (same layout; see
+/// `h264::recon`).
+pub const MAGIC4: &[u8; 4] = b"PPM4";
 /// Magic of HEVC streams, which share the `PPM3` layout.
 pub const MAGIC_HEVC: &[u8; 4] = b"PPH3";
 
@@ -96,10 +103,22 @@ enum SegState {
 }
 
 impl SegState {
-    fn new(codec: Codec) -> Self {
+    fn new(codec: Codec, rec: bool) -> Self {
         match codec {
-            Codec::Avc => SegState::Avc { ps: ParamSets::default(), pic: Picture::default(), cpic: Box::default() },
+            Codec::Avc => {
+                let mut pic = Picture::default();
+                pic.rec = rec.then(Box::<crate::h264::recon::Recon>::default);
+                SegState::Avc { ps: ParamSets::default(), pic, cpic: Box::default() }
+            }
             Codec::Hevc => SegState::Hevc(Box::default()),
+        }
+    }
+
+    /// Picture management for a slice NAL unit stored raw (decoder side; the compressor did
+    /// the same in [`verify_slice`] before it knew the slice would be stored raw).
+    fn rec_raw_slice(&mut self, nal: &[u8]) {
+        if let SegState::Avc { ps, pic, .. } = self {
+            rec_begin(nal, ps, pic);
         }
     }
 
@@ -415,6 +434,7 @@ fn verify_slice(
     cpic: &mut cavlc::Picture,
     recs: &mut Vec<Rec>,
 ) -> Result<Verified, usize> {
+    rec_begin(nal, ps, pic);
     let t = (nal[0] & 31) as u32;
     let rbsp = unescape(&nal[1..]);
     let mut chk = Vec::with_capacity(nal.len());
@@ -437,6 +457,81 @@ fn verify_slice(
     let fixup = tail_fixup(&rbsp[start..], &data)?;
     p.commit();
     Ok(Verified { hdr_bits: sh.data_bit, rbsp, ..fixup })
+}
+
+/// Starts the picture and reference lists of a slice in the reconstruction, if the stream
+/// has one. Both sides call it for every slice NAL unit whose header parses, in stream order.
+fn rec_begin(nal: &[u8], ps: &ParamSets, pic: &mut Picture) {
+    if pic.rec.is_none() || nal.is_empty() {
+        return;
+    }
+    let rbsp = unescape(&nal[1..]);
+    let mut chk = Vec::with_capacity(nal.len());
+    escape(&rbsp, &mut chk);
+    if chk != nal[1..] {
+        return;
+    }
+    if let Ok((sh, sps, _)) = ps.slice_header(&rbsp, (nal[0] & 31) as u32, ((nal[0] >> 5) & 3) as u32) {
+        rec_begin_header(&sh, sps, pic);
+    }
+}
+
+fn rec_begin_header(sh: &SliceHeader, sps: &Sps, pic: &mut Picture) {
+    if let Some(rec) = pic.rec.as_mut() {
+        rec.begin_slice(&crate::h264::recon::SliceInfo {
+            first_mb: sh.first_mb,
+            slice_type: sh.slice_type,
+            frame_num: sh.frame_num,
+            idr: sh.idr,
+            nal_ref_idc: sh.nal_ref_idc,
+            num_ref: [sh.num_ref_l0, sh.num_ref_l1],
+            log2_max_frame_num: sps.log2_max_frame_num,
+            poc_type: sps.poc_type,
+            log2_max_poc_lsb: sps.log2_max_poc_lsb,
+            max_num_ref_frames: sps.max_num_ref_frames,
+            wmb: sps.width_mbs as usize,
+            hmb: sps.height_mbs() as usize,
+            ri: &sh.ri,
+        });
+    }
+}
+
+/// Whether the parameter sets of a track (container and in-band) select CABAC, so the
+/// pixel-context model applies.
+fn track_uses_cabac(input: &[u8], samples: &[(u64, u32)], nls: usize, params: &[Vec<u8>]) -> bool {
+    let is_cabac = |nal: &[u8]| -> bool {
+        nal.len() > 1 && nal[0] & 31 == 8 && crate::h264::parse_pps(&unescape(&nal[1..])).is_ok_and(|p| p.cabac)
+    };
+    if params.iter().any(|n| is_cabac(n)) {
+        return true;
+    }
+    samples.iter().take(64).any(|&(o, s)| {
+        let smp = &input[o as usize..(o + s as u64) as usize];
+        split_nals(smp, nls).is_some_and(|ns| ns.iter().any(|&(a, l)| is_cabac(&smp[a..a + l])))
+    })
+}
+
+/// Whether a sample starts a run that needs no earlier picture: an IDR access unit, or one
+/// whose slices are all I slices.
+fn is_keyframe(smp: &[u8], nals: &[(usize, usize)]) -> bool {
+    let mut any = false;
+    for &(a, l) in nals {
+        let nal = &smp[a..a + l];
+        match nal[0] & 31 {
+            5 => return true,
+            1 => {
+                let rbsp = unescape(&nal[1..nal.len().min(16)]);
+                let mut r = crate::bits::BitReader::new(&rbsp);
+                let (Ok(_), Ok(st)) = (r.ue(), r.ue()) else { return false };
+                if st % 5 != 2 {
+                    return false;
+                }
+                any = true;
+            }
+            _ => {}
+        }
+    }
+    any
 }
 
 /// Position of the rbsp_stop_one_bit: the last set bit of the RBSP.
@@ -800,6 +895,9 @@ pub struct Options {
     pub stats: bool,
     /// Worker threads (0 = all cores, capped at 8). Never changes the output.
     pub threads: usize,
+    /// Do not model H.264 with the decoded pictures (writes the older `PPM3` stream: faster,
+    /// a little larger).
+    pub no_pixels: bool,
 }
 
 /// Progress callback: `(processed_bytes, total_bytes) -> keep_going`.
@@ -819,6 +917,8 @@ pub fn probe(input: &[u8]) -> bool {
 /// reference pictures, so a cut only resets the model's statistics and its memory of the
 /// previous picture.
 const SEG_TARGET: usize = 3 << 20;
+/// Longest segment of a reconstructed (`PPM4`) stream without a key frame to cut at.
+const REC_SEG_MAX: usize = 48 << 20;
 /// Hash-table size of the model that codes the container bytes.
 const HEADER_BITS: u32 = 20;
 const MAX_WORKERS: usize = 8;
@@ -907,7 +1007,7 @@ struct SegPlan {
     preamble: Vec<Vec<u8>>,
 }
 
-fn plan_segments(input: &[u8], samples: &[(u64, u32)], nls: usize, codec: Codec) -> Option<Vec<SegPlan>> {
+fn plan_segments(input: &[u8], samples: &[(u64, u32)], nls: usize, codec: Codec, rec: bool) -> Option<Vec<SegPlan>> {
     let mut plans = Vec::new();
     let mut start = 0;
     let mut acc = 0usize;
@@ -919,7 +1019,11 @@ fn plan_segments(input: &[u8], samples: &[(u64, u32)], nls: usize, codec: Codec)
         if nals.iter().any(|&(_, l)| l < codec.hdr_len()) {
             return None;
         }
-        if i > start && acc >= SEG_TARGET {
+        // With picture reconstruction a segment starts at a key frame, so its decoder has
+        // every reference picture; a run without key frames is cut anyway at REC_SEG_MAX
+        // (its pictures then predict from grey until intra blocks refresh them).
+        let key_ok = !rec || acc >= REC_SEG_MAX || is_keyframe(smp, &nals);
+        if i > start && acc >= SEG_TARGET && key_ok {
             plans.push(SegPlan { first: start, end: i, preamble: std::mem::take(&mut pre) });
             start = i;
             acc = 0;
@@ -1052,7 +1156,8 @@ pub(crate) fn compress_track(
             return Ok(None);
         }
     }
-    let Some(plans) = plan_segments(input, &samples, nls, codec) else { return Ok(None) };
+    let rec = codec == Codec::Avc && !opts.no_pixels && track_uses_cabac(input, &samples, nls, &track.param_nals);
+    let Some(plans) = plan_segments(input, &samples, nls, codec, rec) else { return Ok(None) };
 
     // Header stream: sample table, segment boundaries, container bytes.
     let mut st = Stats { samples: samples.len(), segments: plans.len(), hevc: codec == Codec::Hevc, ..Default::default() };
@@ -1092,10 +1197,10 @@ pub(crate) fn compress_track(
         let plan = &plans[i];
         let size: usize = samples[plan.first..plan.end].iter().map(|&(_, s)| s as usize).sum();
         let bits = opts.table_bits.unwrap_or_else(|| auto_table_bits(size)).clamp(MIN_TABLE_BITS, MAX_TABLE_BITS);
-        encode_segment(input, &samples, nls, codec, &track.param_nals, plan, bits, opts.stats, tick)
+        encode_segment(input, &samples, nls, codec, rec, &track.param_nals, plan, bits, opts.stats, tick)
             .map(|(d, s)| (bits, d, s))
     });
-    let mut out = codec.magic().to_vec();
+    let mut out = if rec { MAGIC4.to_vec() } else { codec.magic().to_vec() };
     put_varint(&mut out, header.len() as u64);
     out.extend_from_slice(&header);
     for r in results {
@@ -1115,6 +1220,7 @@ fn encode_segment(
     samples: &[(u64, u32)],
     nls: usize,
     codec: Codec,
+    rec: bool,
     base_params: &[Vec<u8>],
     plan: &SegPlan,
     bits: u32,
@@ -1122,7 +1228,7 @@ fn encode_segment(
     tick: &mut dyn FnMut(u64) -> bool,
 ) -> Result<(Vec<u8>, Stats), Cancelled> {
     let mut st = Stats::default();
-    let mut cs = SegState::new(codec);
+    let mut cs = SegState::new(codec, rec);
     for n in base_params {
         cs.add_param(n);
     }
@@ -1208,6 +1314,11 @@ fn encode_segment(
             }
         }
     }
+    if let SegState::Avc { pic, .. } = &mut cs {
+        if let Some(rec) = pic.rec.as_mut() {
+            rec.finish_picture();
+        }
+    }
     Ok((enc.finish(), st))
 }
 
@@ -1240,9 +1351,10 @@ pub(crate) fn decompress_track(data: &[u8], params: Option<&[Vec<u8>]>, threads:
     if data.len() < 5 {
         return Err(Bad);
     }
-    let codec = match &data[..4] {
-        m if m == MAGIC => Codec::Avc,
-        m if m == MAGIC_HEVC => Codec::Hevc,
+    let (codec, rec) = match &data[..4] {
+        m if m == MAGIC => (Codec::Avc, false),
+        m if m == MAGIC4 => (Codec::Avc, true),
+        m if m == MAGIC_HEVC => (Codec::Hevc, false),
         _ => return Err(Bad),
     };
     let mut pos = 4;
@@ -1334,7 +1446,7 @@ pub(crate) fn decompress_track(data: &[u8], params: Option<&[Vec<u8>]>, threads:
         let taken = regions[k].lock().unwrap().take();
         let (region, lo, first, end) = taken.expect("each region is decoded once");
         let (bits, seg) = segs[k];
-        decode_segment(seg, bits, region, lo, &samples[first..end], nls, codec, &param_nals, tick)
+        decode_segment(seg, bits, region, lo, &samples[first..end], nls, codec, rec, &param_nals, tick)
     });
     for r in results {
         r?;
@@ -1351,12 +1463,13 @@ fn decode_segment(
     samples: &[(usize, usize)],
     nls: usize,
     codec: Codec,
+    rec: bool,
     base_params: &[Vec<u8>],
     tick: &mut dyn FnMut(u64) -> bool,
 ) -> R<()> {
     let mut c = ArithDec::new(data);
     let mut m = Model::new(bits);
-    let mut cs = SegState::new(codec);
+    let mut cs = SegState::new(codec, rec);
     for nal in base_params {
         cs.add_param(nal);
     }
@@ -1414,6 +1527,7 @@ fn decode_segment(
                         if sh.data_bit != hbits {
                             return Err(Bad);
                         }
+                        rec_begin_header(&sh, sps, pic);
                         if pps.cabac {
                             let mut io = ModelIo::new(&mut m, &mut c);
                             let mut p = SliceParser::new(sps, pps, &sh, pic)?;
@@ -1457,6 +1571,7 @@ fn decode_segment(
                 }
                 cs.add_param(&nal);
                 if codec.is_slice(t) {
+                    cs.rec_raw_slice(&nal);
                     cs.after_slice(&nal, false);
                 }
                 nal

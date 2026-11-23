@@ -357,6 +357,81 @@ eight to six hashed contexts and found a better set. Together these made compres
 2.4 times and decompression about 1.5 times faster per core than the first version, while
 files got 0.2-0.6 percentage points smaller.
 
+### Decoded pictures as context (`PPM4`)
+
+Everything above models the syntax: CABAC's contexts and the extra side information are
+neighbouring syntax elements. But a block's residual is what its prediction missed, and the
+prediction itself, which the decoder can compute, says a lot about where it will miss:
+
+- a textured prediction leaves residual at the frequencies where it is textured, a flat one
+  almost none;
+- where the two predictions of a bi-predicted block disagree, their average is unsure;
+- where a block's prediction does not join the decoded samples above and to the left of it,
+  the residual has to close the gap, which even gives away the signs of its low-frequency
+  coefficients (the idea behind sign prediction in recent codec research, and behind
+  Lepton's edge prediction for JPEG);
+- motion vectors repeat the motion of the co-located block in the previous picture, and the
+  list-1 vector of a bi-predicted block mirrors its list-0 vector;
+- encoders with adaptive quantisation (x264's default) set each macroblock's QP from the
+  variance of the source, which the prediction approximates.
+
+So the recoder decodes the video. `h264/recon.rs`, with hooks in `h264/mb.rs`, is a complete
+H.264 decoder for progressive 8-bit 4:2:0 frames: intra 4x4, 8x8, 16x16 and chroma prediction;
+motion vector prediction with P_Skip and spatial and temporal direct modes, computed while the
+syntax is parsed; picture order counts, reference lists with modifications and marking with
+memory management operations; quarter-sample interpolation; explicit and implicit weighted
+prediction; dequantisation, the inverse transforms and the deblocking filter. Compressor and
+decompressor run it on the same syntax, and it never decides a bin: it only adds fields to
+the hints. A mistake in it would cost compression, not data. It is nonetheless bit-exact: its
+pictures match those of FFmpeg's H.264 decoder on
+every picture of six files from at least four different encoders, 6,905 pictures in all,
+including weighted prediction, B-pyramids, temporal direct mode and references duplicated by
+list modification. That matters: before weighted prediction and duplicated references were
+right, the trailer below gained 1.1 points instead of 3.1.
+
+From the pictures the model gets, per coded luma block (4x4 or 8x8) and chroma AC block, the
+magnitude of the prediction's transform in quantiser steps at each scan position, the block's
+total and what remains after each position, and for bi-predicted blocks the same for the
+difference of the two predictions (significance, last, first level bin, coded block flag); per
+coefficient sign, the sign that brings the block's first row and column closer to its decoded
+neighbours, with the coefficients decoded before it (higher frequencies) applied, and how much
+closer; per motion vector difference, the differences that the scaled co-located motion and
+(list 1) the partition's own scaled list-0 vector would give, and how far the neighbours'
+vectors spread; for QP deltas, the log-variance of the prediction and its change since the
+last QP delta; and for the coded block pattern, the texture of each 8x8 prediction.
+
+Segments of such a stream start at key frames (IDR or all-I pictures), so every segment's
+decoder has its reference pictures; a stretch of 48 MB without one is cut anyway and predicts
+from grey until intra blocks refresh it. Slices stored raw are never parsed by the
+decompressor, so their macroblocks get the same deterministic stand-in on both sides before
+the picture is deblocked.
+
+| file | encoder | size | `PPM3` | `PPM4` |
+|---|---|---:|---:|---:|
+| game trailer, 1080p | x264-style High profile, 8x8 transforms, weighted prediction | 18.6 MB | 7.03% | **10.10%** |
+| game recording, 1080p | hardware encoder, I/P/B | 1.10 GB | 6.20% | **8.17%** |
+| game recording, 1080p | hardware encoder, I/P/B | 70.5 MB | 5.87% | **7.38%** |
+| game recording, 1080p | hardware encoder, I/P/B | 63.1 MB | 8.54% | **10.77%** |
+| game recording, 1080p | hardware encoder, I/P/B | 16.5 MB | 5.78% | **7.33%** |
+| game recording, 1080p | hardware encoder, I/P/B | 12.4 MB | 7.59% | **10.16%** |
+| downloaded clip | High profile | 7.84 MB | 11.19% | **13.09%** |
+| music video, 1080p | High profile | 26.7 MB | 6.17% | **8.41%** |
+| IDE walkthroughs (26 clips) | screen recordings | 13.3 MB | 21.19% | **23.35%** |
+| recordings in fragmented MP4 (3 files) | screen recorder, High profile | 413 MB | 6.68% | **8.53%** |
+| game capture in an MPEG transport stream | High profile | 1.05 GB | 11.09% | **13.80%** |
+
+On the trailer the motion vector differences now cost 9.2% less than under CABAC (3.7%
+before), the QP deltas 20.1% less (7.9%), the coefficient signs 15.1% less (11.5%) and the
+significance map 6.4% less (4.4%). Every file round-trips byte for byte.
+
+The price is time, because decoding cost grows with pixels while the old coder's grew with
+bits. On high-bitrate recordings compression takes about 1.5 times the CPU time of `PPM3`
+(the 1.1 GB recording: 374 s instead of 250 s on 8 threads); on nearly static screen
+recordings, where most macroblocks are skipped, about 3.5 times, after fast paths for skipped
+macroblocks with zero motion and for edges the deblocking filter leaves alone. CAVLC streams,
+which the decoder does not rebuild, keep the `PPM3` layout, and `Options::no_pixels` writes
+it for CABAC too.
+
 ### H.264 CAVLC (Baseline)
 
 Baseline-profile H.264, common in messaging apps, video calls, webcams and older phones, has no

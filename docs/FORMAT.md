@@ -135,7 +135,7 @@ crc32) is followed directly by this payload:
 
 | field | type | notes |
 |---|---|---|
-| magic | 4 bytes | `PPM3` |
+| magic | 4 bytes | `PPM3`, or `PPM4` (see below) |
 | header length | varint | bytes of the header stream |
 | header stream | bytes | binary arithmetic-coder stream (model with 2^20 slots) |
 | per segment: table bits | u8 | log2 of that segment model's hash-table size, `16..=24` (4 bytes per slot) |
@@ -203,6 +203,56 @@ intra modes, coded block pattern and flags, transform size, motion-vector signs)
 second table with 1/64 of the segment's slots (2^12 to 2^18). Its exact definition is the
 reference implementation in `crates/media`; `testdata/golden/h264-mp4.bin.pp` (CABAC) and
 `h264-cavlc-mp4.bin.pp` (CAVLC) check it.
+
+### H.264 with decoded pictures (`PPM4`)
+
+When the track's parameter sets (the `avcC` record, or an in-band PPS in the first 64
+samples) select CABAC, the encoder writes the magic `PPM4` instead of `PPM3`. The layout is
+the same; three things differ.
+
+Segments start at key frames: once a run holds about 3 MB of video, it is cut only before a
+sample that contains an IDR slice or whose slices are all I slices, or regardless once it
+holds 48 MB.
+
+Both sides rebuild the decoded pictures from the parsed syntax with the decoding process of
+H.264 clause 8, for frames (`frame_mbs_only_flag` 1): picture order counts (types 0 and 2;
+type 1 is treated as type 2), reference picture lists with their modifications, reference
+marking (sliding window and memory management control operations), intra prediction, inter
+prediction with weighted prediction (explicit and implicit) and spatial and temporal direct
+modes, dequantisation with flat scaling matrices, the inverse transforms, and the deblocking
+filter. For every slice NAL unit whose header parses, recoded or stored raw, in stream order,
+the decoder starts a new picture when `first_mb_in_slice` is 0 (finishing the previous one)
+and then sets up the slice's reference lists. A missing reference picture predicts grey (128).
+Before a finished picture is deblocked and kept as a reference, every macroblock that no
+recoded slice rebuilt (slices stored raw are never parsed by the decoder) takes the co-located
+samples of the latest reference picture (grey if there is none), no motion, and no
+deblocking. A slice uses the pictures only when its SPS has the size of the picture being
+rebuilt.
+
+The model's side information then also comes from the pictures (it adds fields to the hints;
+the CABAC bins and their order are unchanged):
+
+- for each coded luma block (4x4 or 8x8) and chroma AC block: the magnitude of the forward
+  transform of its prediction in quantiser steps at each scan position (log buckets), the
+  block's total and the part after each scan position (significance, last, first level bin,
+  coded_block_flag); for bi-predicted luma blocks the same for the difference of the two
+  predictions;
+- for each coefficient sign of a luma block: which sign makes the block's first row and column
+  closer to the reconstructed samples above and to the left of it, and how much closer, with
+  the coefficients decoded before it (higher frequencies) already applied;
+- for each motion vector difference: the motion vector predictor is computed while parsing,
+  and the difference that the co-located motion of the first list-1 (P slices: list-0)
+  reference, scaled by picture order count distance, would give; for list 1 also the one the
+  partition's own list-0 vector would give; and how far the neighbours' vectors spread;
+- for `mb_qp_delta`: the log2 variance of the macroblock's luma prediction (intra
+  macroblocks: of the co-located area of the latest reference) and its change since the last
+  macroblock that coded a QP delta;
+- for `coded_block_pattern` of inter macroblocks: the prediction texture of each 8x8 luma
+  block and of the chroma, and how much the two predictions of bi-predicted blocks differ.
+
+The exact definitions are in `crates/media/src/h264/recon.rs` and `mb.rs`;
+`testdata/golden/h264-mp4.bin.pp` checks them. `PPM3` streams (written by PiedPiper 0.1)
+decode as before.
 
 ### HEVC (`PPH3`)
 

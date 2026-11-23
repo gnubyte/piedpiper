@@ -27,5 +27,5 @@ pub mod vp9;
 pub use detect::is_opaque_video;
 pub use container::{
     compress, compress_with, decompress, decompress_with, probe, Cancelled, Codec, Options, Progress, Stats, FAIL_NAMES,
-    MAGIC, MAGIC_HEVC,
+    MAGIC, MAGIC4, MAGIC_HEVC,
 };

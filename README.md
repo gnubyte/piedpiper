@@ -255,13 +255,18 @@ with or better than WebP lossless, and PNG pixels 11–34% fewer than the PNG's 
 These codecs already removed nearly all of the redundancy, so byte-level compressors get
 almost nothing: xz and the Transformer measure about 8.0 bits per byte on real clips.
 PiedPiper instead parses each slice (or VP8/VP9 partition) down to its entropy coder's decisions, codes them with a stronger
-context-mixing model, and rebuilds the original bitstream bit for bit on decompression:
+context-mixing model, and rebuilds the original bitstream bit for bit on decompression. For
+H.264 with CABAC it also decodes the pictures themselves (bit-exactly, with its own decoder)
+and lets the model see each block's prediction, which tells where residual and which
+coefficient signs are likely, and the motion of the previous picture, which predicts the
+motion vectors:
 
 | file | content | size | xz -9e | PiedPiper |
 |---|---|---:|---:|---:|
-| game trailer, 1080p | rendered footage | 18.6 MB | 0.2% | **7.0% smaller** |
-| IDE walkthroughs (23 clips) | screen recordings | 11.9 MB | — | **20.4% smaller** (8.3–52%) |
-| IDE screencast, 720p | screen recording | 1.35 MB | 2.1% | **14.2% smaller** |
+| game trailer, 1080p | rendered footage | 18.6 MB | 0.2% | **10.1% smaller** |
+| game recordings, 1080p (5 files) | hardware-encoded game footage, H.264 High | 1.26 GB | — | **8.3% smaller** (7.3–10.8%) |
+| IDE walkthroughs (26 clips) | screen recordings | 13.3 MB | — | **23.4% smaller** (9.5–56%) |
+| IDE screencast, 720p | screen recording | 1.35 MB | 2.1% | **15.5% smaller** |
 | setup animation, 4.5K | motion graphics with padding | 593 KB | 48.6% | **58.2% smaller** |
 | phone video, 1080p (3 clips) | camera footage, HEVC | 20.8 MB | 0.2% | **6.4% smaller** |
 | phone video, 4K (2 clips) | camera footage, HEVC | 127 MB | 0.1% | **8.1% smaller** (6.5–10.1%) |
@@ -272,8 +277,8 @@ context-mixing model, and rebuilds the original bitstream bit for bit on decompr
 | older WebM clips (4 files, 406x720 to 1280x720) | mixed footage, VP8 | 9.04 MB | 0.0% | **15.7% smaller** (12.1–23.3%) |
 | DVD rip, 720x480 interlaced | film, MPEG-2 in MKV with 4 AC3 tracks | 1.52 GB | 1.7%¹ | **18.7% smaller** (video 19.6%, AC-3 audio 13.7%) |
 | video clips, 1080p (18 files, one 720p) | H.264 Baseline (CAVLC) | 1.83 GB | 2.3%² | **17.3% smaller** (14.6–31.1%) |
-| recordings in fragmented MP4 (3 files) | H.264 High (CABAC), `moof`/`trun` sample tables | 413 MB | 0.1% | **6.7% smaller** (6.2–34.4%) |
-| game capture | H.264 High (CABAC) in an MPEG transport stream | 1.05 GB | 2.6% | **11.1% smaller** (slices 8.1%) |
+| recordings in fragmented MP4 (3 files) | H.264 High (CABAC), `moof`/`trun` sample tables | 413 MB | 0.1% | **8.5% smaller** (8.4–37.1%) |
+| game capture | H.264 High (CABAC) in an MPEG transport stream | 1.05 GB | 2.6% | **13.8% smaller** (slices 11.0%) |
 | phone video remuxed to `.ts` (2 recordings) | camera footage, HEVC | 883 MB | 0.4% | **9.7% smaller** (7.8% and 11.7%) |
 | remuxed to `.m2ts` (192-byte packets): one of them, and a clip | HEVC; H.264 Baseline (CAVLC) | 513 MB | — | **13.6% and 29.8% smaller** |
 
@@ -288,9 +293,16 @@ recodes except the few that use PCM blocks. ¹xz -6 on the first 100 MB. ²xz -9
 samples and a game client's UI animations; the calibration clip repeats 887 of its 1,046
 frames byte for byte, and repeated frames are stored as references to the earlier copy.
 
+Decoding the pictures added 1.4 to 3.1 percentage points on the H.264 CABAC files above
+(the trailer went from 7.0% to 10.1%, the five game recordings from 6.3% to 8.3%); see
+[docs/DESIGN.md](docs/DESIGN.md#decoded-pictures-as-context-ppm4). It costs time: about 1.5
+times the CPU time on high-bitrate recordings and up to 3.5 times on nearly static screen
+recordings, and such files are split into parallel segments only at key frames.
+
 Every clip decompresses byte-identical, and the encoder checks that before it uses mode 2.
 The recoder runs at about 0.3–0.5 MB/s per core to compress and 0.2–0.4 MB/s to decompress
-(measured on a busy 8-core Ryzen 7 5800). Files larger than about 3 MB are split into
+(measured on a busy 8-core Ryzen 7 5800; H.264 with CABAC now takes 1.5 to 3.5 times as long,
+as above). Files larger than about 3 MB are split into
 segments that are coded in parallel on up to 8 threads; the thread count never changes the
 output. HEVC recodes at about the same speed. It handles H.264 with CABAC or CAVLC (Baseline,
 Main and High profiles: progressive, 4:2:0, 8-bit) and HEVC (Main, Main 10 and Main Still Picture: 4:2:0 or

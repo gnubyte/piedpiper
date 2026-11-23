@@ -5,9 +5,9 @@
 //! HEVC (CABAC) and VP8/VP9 (a boolean arithmetic coder) leave the bytes close to random. The
 //! `piedpiper-media` crate instead parses each slice or tile down to its binary decisions,
 //! codes them with a stronger context-mixing model, and rebuilds the original bitstream bit
-//! for bit on decompression (see docs/DESIGN.md). The payload's own magic (`PPM2` for H.264,
-//! `PPH3` for HEVC, `PPV9` for VP9, `PPV8` for VP8, `PPMV` for MPEG-2) says which recoder
-//! wrote it.
+//! for bit on decompression (see docs/DESIGN.md). The payload's own magic (`PPM3` or `PPM4`
+//! for H.264, `PPH3` for HEVC, `PPV9` for VP9, `PPV8` for VP8, `PPMV` for MPEG-2, `PPTS` for
+//! transport streams) says which recoder wrote it.
 
 use crate::codec::ProgressFn;
 use crate::error::{Error, Result};
